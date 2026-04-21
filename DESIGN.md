@@ -30,11 +30,36 @@ Claude hook との対応：
 
 | Hook | 意味 | 動作 |
 |---|---|---|
-| Notification | 権限要求 / 60秒アイドル | `push --kind notification` |
-| Stop | ターン完了 | `push --kind stop` |
+| Notification | 権限要求 / 60秒アイドル | `push --kind notification && bellmux bell` |
+| Stop | ターン完了 | `push --kind stop && bellmux bell` |
 | UserPromptSubmit | ユーザーが応答 | `ack-pane` |
+| PostToolUse | ツール実行完了 | `ack-pane` |
 
 加えて `prefix + a`（現在ペイン）/ `prefix + X`（全体）で手動 ack。
+
+### ベルコマンドの分離
+
+`bellmux push` は DB 記録のみに専念し、ベルを鳴らさない。Hook 側で `&& bellmux bell` を連結することで、**ユーザーは後段を自由に差し替えられる**: `afplay /System/Library/Sounds/Ping.aiff`、`terminal-notifier -message ...`、`osascript -e 'display notification ...'` など。push が suppress 判定した場合は **exit 3** で抜けるため、`&&` は自然に後段を skip する。従来の「push が内部で bell を鳴らす」方式は、「glue は全て snippet 埋め込み」の設計原則に反し、かつカスタマイズ性を潰していた。
+
+### `notification_type` による dispatch
+
+新しい Claude Code は Notification の payload に `notification_type` を含める（例: `"permission_prompt"`）。`cmd_push` は：
+
+1. `notification_type` が present なら: `permission_prompt` のみ surface、それ以外は suppress（exit 3）。
+2. `notification_type` が absent（古い Claude Code）なら: 従来の message 文字列マッチ（"waiting for your input"）にフォールバック。
+
+方針は allowlist: 未知の type は保守的に suppress。新しい surface-worthy type が Claude Code 側に追加された場合のみ手当てする。
+
+### ダイアログ応答と ack の関係
+
+Permission dialog の応答に直接対応するフックは **Claude Code が提供していない**（実測確認済み）。
+
+- **"Allow" クリック**: PreToolUse は既にダイアログ前に発火済み、PostToolUse がツール実行完了で発火する。**PostToolUse が "Allow" の確定シグナル**。
+- **"Deny" クリック**: フックは一切発火しない。これは上流の hook gap であり、bellmux 側で解決不能。
+
+そのため PostToolUse を ack トリガとして追加した。副作用として Claude がツール連続実行中に pending notification が消えるが、**「Claude が能動的に動いている ≡ ユーザー応答を待っていない」** と解釈できるため意図と整合する。
+
+"Deny" 応答後に古い notification が残る問題は、実運用上「拒否した直後にユーザーが新しいプロンプトを入力することが多く、UserPromptSubmit で自然に ack される」ため許容。Claude Code 側で "ツール拒否時にフック発火する" 機能が将来入れば、そこで拾える。手動 ack (`prefix + A`) も常に利用可能。
 
 ## tmux statusbar / border: 試行錯誤の経緯
 
@@ -84,8 +109,9 @@ Claude hook との対応：
 | 0 | 正常終了。stdin が空 / 非 JSON でも `message=NULL` で INSERT する（寛容 parse）。 |
 | 1 | 実行時エラー（DB ロック超過、IO エラー、disk full 等）。stderr に warn。 |
 | 2 | 引数エラー（`pane_id` 不正形式、未知の `--kind` 値等）。 |
+| 3 | `push` のみ: Notification が suppress 対象だった（idle ping 等）。DB 変更なし。Hook snippet の `bellmux push ... && bellmux bell` で後段の bell を自然に skip するための signal。 |
 
-push 失敗時の影響範囲: Claude hook は `&&` 連結を使わない素朴構成なので、push 失敗でも Claude Code の動作は止まらない。次の status-interval poll で state は整合する。
+`push` 成功（exit 0）後に hook は `&& bellmux bell` で bell を鳴らす。`push` 失敗（1/2）や suppress（3）では `&&` が短絡して bell は鳴らず、DB と bell が必ず同期する。
 
 ## Phase 2 以降の余地
 

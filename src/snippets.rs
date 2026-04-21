@@ -93,23 +93,46 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 # Add these to ~/.claude/settings.json. If the file already has a "hooks"
 # section, merge — do NOT overwrite. The $TMUX_PANE env var is set by tmux
 # automatically and inherited by the Claude Code hook subprocess.
+#
+# Customising the alert sound:
+#   `bellmux push ... && bellmux bell` fires BEL on every login tty after a
+#   successful push. `bellmux push` exits 3 when a notification is suppressed
+#   (e.g. idle ping), so `&&` naturally skips the bell in that case. Replace
+#   `bellmux bell` with anything: `afplay /System/Library/Sounds/Ping.aiff`,
+#   `osascript -e 'display notification "..."'`, `terminal-notifier ...`, etc.
+#
+# Ack policy:
+#   - UserPromptSubmit: user typed a new prompt — clear pending.
+#   - PostToolUse: a tool just finished. This is the only reliable signal that
+#     the user responded "Allow" to a permission dialog (PreToolUse fires
+#     *before* the dialog; Claude Code fires no hook at all on "Deny"). Acking
+#     here also clears any pending notification for the pane whenever Claude
+#     is actively running tools, which matches the "Claude is working, don't
+#     nag me" intent.
 {
   "hooks": {
     "Notification": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\""
+        "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"
       }]
     }],
     "Stop": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\""
+        "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"
       }]
     }],
     "UserPromptSubmit": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+      }]
+    }],
+    "PostToolUse": [{
       "matcher": "",
       "hooks": [{
         "type": "command",

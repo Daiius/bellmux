@@ -113,9 +113,11 @@ fn run(cli: Cli) -> Result<()> {
 
 fn cmd_push(pane_id: &str, kind: Kind) -> Result<()> {
     validate::pane_id(pane_id)?;
-    let message = read_stdin_message();
-    if should_suppress(kind, message.as_deref()) {
-        return Ok(());
+    let payload = read_stdin_payload();
+    if should_suppress(kind, payload.message.as_deref(), payload.notification_type.as_deref()) {
+        // Exit 3 signals "valid input, deliberately skipped" so that the hook
+        // snippet `bellmux push ... && bellmux bell` does not fire the bell.
+        std::process::exit(3);
     }
     let conn = db::open()?;
     db::insert(
@@ -123,20 +125,24 @@ fn cmd_push(pane_id: &str, kind: Kind) -> Result<()> {
         &db::now_iso8601(),
         pane_id,
         kind.as_str(),
-        message.as_deref(),
+        payload.message.as_deref(),
     )?;
-    ring_bell();
     Ok(())
 }
 
-/// Substrings that mark a Claude Code Notification we never want to surface
-/// (currently: the 60-second idle ping that fires repeatedly while the user is
-/// already aware Claude is waiting). Match is case-insensitive on `contains`.
+/// Legacy message substrings used when the Notification payload does not
+/// include `notification_type` (older Claude Code versions).
 const NOTIFICATION_SUPPRESS_PATTERNS: &[&str] = &["waiting for your input"];
 
-fn should_suppress(kind: Kind, message: Option<&str>) -> bool {
+fn should_suppress(kind: Kind, message: Option<&str>, notification_type: Option<&str>) -> bool {
     if !matches!(kind, Kind::Notification) {
         return false;
+    }
+    // Newer Claude Code versions ship `notification_type`. When present, only
+    // `permission_prompt` is surfaced; any other kind (idle pings etc.) is
+    // dropped. Substring-match on `message` stays as a fallback.
+    if let Some(nt) = notification_type {
+        return nt != "permission_prompt";
     }
     let Some(msg) = message else { return false };
     let msg_lower = msg.to_ascii_lowercase();
@@ -269,19 +275,31 @@ fn cmd_init(preset: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn read_stdin_message() -> Option<String> {
+#[derive(Default)]
+struct StdinPayload {
+    message: Option<String>,
+    notification_type: Option<String>,
+}
+
+fn read_stdin_payload() -> StdinPayload {
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
-        return None;
+        return StdinPayload::default();
     }
     let value: serde_json::Value = match serde_json::from_str(&buf) {
         Ok(v) => v,
-        Err(_) => return None,
+        Err(_) => return StdinPayload::default(),
     };
-    value
-        .get("message")
-        .and_then(|v| v.as_str())
-        .map(db::sanitize_message)
+    StdinPayload {
+        message: value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(db::sanitize_message),
+        notification_type: value
+            .get("notification_type")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    }
 }
 
 fn print_list_human(rows: &[db::Notification]) {
@@ -321,40 +339,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn suppress_idle_notification() {
-        assert!(should_suppress(
+    fn notification_type_surfaces_permission_prompt() {
+        // permission_prompt is the only Notification kind we care about.
+        assert!(!should_suppress(
             Kind::Notification,
-            Some("Claude is waiting for your input")
-        ));
-        // Case-insensitive match on the substring.
-        assert!(should_suppress(
-            Kind::Notification,
-            Some("WAITING FOR YOUR INPUT to continue")
+            Some("Claude needs your permission to use Bash"),
+            Some("permission_prompt"),
         ));
     }
 
     #[test]
-    fn permission_notification_passes_through() {
+    fn notification_type_suppresses_other_kinds() {
+        // Any notification_type other than permission_prompt is dropped,
+        // regardless of message content. This covers idle pings and any
+        // future types we have not explicitly allow-listed.
+        assert!(should_suppress(
+            Kind::Notification,
+            Some("something important"),
+            Some("idle"),
+        ));
+        assert!(should_suppress(Kind::Notification, None, Some("unknown")));
+    }
+
+    #[test]
+    fn suppress_idle_notification_legacy_message_fallback() {
+        // When notification_type is absent (older Claude Code), fall back to
+        // the historic substring match on message.
+        assert!(should_suppress(
+            Kind::Notification,
+            Some("Claude is waiting for your input"),
+            None,
+        ));
+        assert!(should_suppress(
+            Kind::Notification,
+            Some("WAITING FOR YOUR INPUT to continue"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn permission_notification_passes_legacy_fallback() {
         assert!(!should_suppress(
             Kind::Notification,
-            Some("Claude needs your permission to use Bash")
+            Some("Claude needs your permission to use Bash"),
+            None,
         ));
     }
 
     #[test]
     fn stop_is_never_suppressed() {
-        // Even if the message somehow contained the idle marker, Stop is
-        // a distinct event that we always want to record.
+        // Stop has no notification_type field at all; it must pass through
+        // regardless of message or fallback patterns.
         assert!(!should_suppress(
             Kind::Stop,
-            Some("waiting for your input")
+            Some("waiting for your input"),
+            None,
         ));
-        assert!(!should_suppress(Kind::Stop, None));
+        assert!(!should_suppress(Kind::Stop, None, Some("idle")));
+        assert!(!should_suppress(Kind::Stop, None, None));
     }
 
     #[test]
-    fn null_message_is_not_suppressed() {
-        // A Notification without a message body shouldn't be silently dropped.
-        assert!(!should_suppress(Kind::Notification, None));
+    fn null_message_is_not_suppressed_without_type() {
+        assert!(!should_suppress(Kind::Notification, None, None));
     }
 }
