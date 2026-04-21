@@ -1,22 +1,27 @@
 # bellmux
 
-Minimal notification layer that bridges Claude Code hooks, tmux, and SQLite. Single Rust binary, no daemon.
+Attention queue for tmux: notify when async work needs you, then jump back to the pane that needs it.
 
-When a Claude Code session in a tmux pane needs your attention (turn finished, tool permission requested), bellmux records it and surfaces it via:
+## What it is
+
+A pane-addressed notification queue. Any command that can run a shell line on completion pushes a notification keyed by its tmux `pane_id`; bellmux tracks what's still waiting on you and gives you one primitive to deal with it — jump to the next pending pane.
+
+Claude Code hooks were the original driver (every turn-end and tool-permission prompt is pushed), but the queue is producer-agnostic. Builds, test runs, deploys, CI watchers, other coding agents — anything with a pane and a shell line all fit.
+
+## What it does for you
+
+While anything is pending, bellmux surfaces it via:
 
 - A coloured tmux status bar that lights up while anything is pending
 - A terminal bell delivered to your active login ttys (so it reaches you across tmux sessions and terminal tabs)
 - Keybindings to cycle through every pane that's waiting on you
 
-## Status
-
-Pre-1.0, personal project. Phase 1 scope: single tmux server, Claude Code only. The CLI surface and snippet output may change. Issues and PRs welcome but not actively solicited.
-
 ## Requirements
 
 - Rust 1.74+ (for `cargo build`)
 - tmux 3.2+ recommended (the `fullbar` status preset uses `#{?#(...),T,F}` conditional styles, available since 2.9)
-- Claude Code CLI for the hook integration
+
+Claude Code is optional — it's the most polished integration, but bellmux runs without it.
 
 ## Install
 
@@ -25,28 +30,32 @@ cargo build --release
 ln -s "$(pwd)/target/release/bellmux" ~/.local/bin/bellmux   # or copy into any $PATH dir
 ```
 
-## Setup
+## Quick start: Claude Code
 
-Print all the snippets bellmux ships with:
-
-```sh
-bellmux init
-```
-
-Or pick one preset at a time:
+bellmux ships with first-party hooks for Claude Code:
 
 ```sh
-bellmux init --preset fullbar         # tmux status-bar style (full-bar recolor)
-bellmux init --preset widget          # tmux status-bar style (right-side widget)
-bellmux init --preset overlay         # tmux status-bar style (non-destructive overlay)
-bellmux init --preset dot             # tmux status-bar style (single dot)
-bellmux init --preset keybinds        # tmux key bindings (jump / ack)
-bellmux init --preset popup-enriched  # tmux popup with session:window.pane enrichment
-bellmux init --preset tmux-hook       # tmux pane-died → prune hook
-bellmux init --preset claude-hooks    # Claude Code hooks for ~/.claude/settings.json
+bellmux init --preset claude-hooks    # → ~/.claude/settings.json
+bellmux init --preset fullbar         # → ~/.tmux.conf  (or widget / overlay / dot)
+bellmux init --preset keybinds        # → ~/.tmux.conf
 ```
 
-Paste the relevant blocks into `~/.tmux.conf` (then `tmux source-file ~/.tmux.conf`) and `~/.claude/settings.json`. Restart Claude Code so it picks up the new hooks.
+Then `tmux source-file ~/.tmux.conf` and restart Claude Code.
+
+## Using with other tools
+
+`bellmux push` is a plain CLI — any shell line inside a tmux pane can drive it. `$TMUX_PANE` is set automatically in every tmux pane's environment:
+
+```sh
+# Notify when a long-running task finishes in this pane
+make build; bellmux push --kind stop --pane-id "$TMUX_PANE" && bellmux bell
+
+# Send a custom message (surfaced in the popup and list output)
+gh run watch $run_id; echo '{"message":"CI done"}' \
+  | bellmux push --kind notification --pane-id "$TMUX_PANE" && bellmux bell
+```
+
+`push` only records; `bell` rings the terminal. Connect them with `&&` when you want both — or drop `bell` if the status-bar colour flip is enough. Acknowledgement is `prefix+A` by default, or `bellmux ack-pane --pane-id %N` programmatically.
 
 ## Default keybindings
 
@@ -75,9 +84,24 @@ bellmux bell                                                   # ring BEL on eve
 bellmux init       [--preset <name>]                           # print setup snippets
 ```
 
+## Snippets
+
+`bellmux init` prints every snippet at once. Or pick one:
+
+```sh
+bellmux init --preset fullbar         # tmux status-bar style (full-bar recolor)
+bellmux init --preset widget          # tmux status-bar style (right-side widget)
+bellmux init --preset overlay         # tmux status-bar style (non-destructive overlay)
+bellmux init --preset dot             # tmux status-bar style (single dot)
+bellmux init --preset keybinds        # tmux key bindings (jump / ack)
+bellmux init --preset popup-enriched  # tmux popup with session:window.pane enrichment
+bellmux init --preset tmux-hook       # tmux pane-died → prune hook
+bellmux init --preset claude-hooks    # Claude Code hooks for ~/.claude/settings.json
+```
+
 ## How it works
 
-See [`CLAUDE.md`](CLAUDE.md) for the implementation overview and [`DESIGN.md`](DESIGN.md) for the rationale, trade-offs, and history of the design decisions (especially the tmux statusbar/border experiments).
+Single Rust binary, no daemon. State lives in a small SQLite file that's statically linked into the binary — nothing to install beyond bellmux itself and tmux. See [`CLAUDE.md`](CLAUDE.md) for the implementation overview and [`DESIGN.md`](DESIGN.md) for the rationale, trade-offs, and history of the design decisions (especially the tmux statusbar/border experiments).
 
 ## License
 
@@ -92,23 +116,66 @@ at your option.
 
 # bellmux（日本語）
 
-Claude Code hook、tmux、SQLite の 3 点を結ぶ最小構成の通知レイヤ。Rust 単一バイナリ、常駐プロセスなし。
+tmux 向け attention queue — 通知して、戻るべきペインへ案内する。
 
-tmux のペインで動いている Claude Code が応答を待ち始めた瞬間（ターン完了、ツール権限要求）を、bellmux が捕捉して以下で可視化します：
+## これは何か
 
-- 未対応がある間 tmux ステータスバーが指定色に切り替わる
-- ユーザーの現在ログイン中の tty 全てにベルを鳴らす（別 tmux セッションや別ターミナルタブで作業していても気付ける）
-- 未対応ペインを順に巡回するキーバインド
+tmux session, pane と紐付けられた通知キューです。
 
-## 開発状況
+通知が欲しいタイミングで bellmux のコマンドを実行すると、`pane_id` をキーに通知を push できます。
 
-Pre-1.0、個人プロジェクトです。Phase 1 のスコープは「単一 tmux サーバー / Claude Code のみ」。CLI と snippet 出力は変わる可能性あり。Issue / PR は歓迎しますが積極的な募集はしていません。
+bellmux は「未対応のペインがまだ残っているか」を記録し、「次の未対応ペインへ飛ぶ」という基本的な機能を提供します。
+
+Claude Code との協調動作が最初のモチベーション（ターン完了 / ツール許可要求のたびに push）でしたが、bellmux そのものは通知元に依存しません。
+
+ビルド、テスト、deploy、CI watcher、他のコーディングエージェント — pane/session 情報と bellmux コマンド実行ができれば、様々なコマンドと組み合わせられます。
+
+## 何をしてくれるか
+
+未対応イベントの存在を可視化し、イベント発行元の tmux session, pane を巡回できます：
+
+- `bellmux status` コマンドで通知の有無を検出します
+  - tmux の status-interval でこのコマンドの出力を監視することで、ステータスバーを指定色に切り替える等、視覚効果をカスタマイズ可能です
+      ```sh
+      # --- bellmux status preset: fullbar ---
+      # Flip the whole status bar to a notify colour while notifications are pending.
+      # Two explicit colours: @bellmux-status-normal / @bellmux-status-notify.
+      # Border is left untouched (tmux re-renders borders only on focus/layout
+      # events, so a conditional border style would lag behind status).
+      # Requires tmux >= 2.9 for #{?#(...),T,F} conditional in styles.
+      set -g status-interval 2
+      set -g @bellmux-status-normal 'bg=green fg=black'
+      set -g @bellmux-status-notify 'bg=colour208 fg=black'
+      set -g status-style '#{?#(bellmux status),#{@bellmux-status-notify},#{@bellmux-status-normal}}'
+      set -g status-right '#(bellmux status --format="{n}: {latest_message}") | %H:%M '
+      ```
+- `bellmux next`, `bellmux prev` コマンドで未対応の通知を順に取得します
+  - tmux キーバインドでこのコマンドの出力を受け取り、「未対応の通知元 tmux session:pane に移動」することができます
+    ```sh
+    # --- bellmux keybindings ---
+    # Jump to the next pending notification in cycle order (does NOT ack).
+    # First press enters at the newest pending pane, subsequent presses walk older.
+    # `bellmux next` appends ` wrapped` when the cycle completes or only one
+    # pane is pending — we surface that via display-message.
+    bind-key a run-shell 'read -r pane tag <<<"$(bellmux next)"; if [ -n "$pane" ]; then tmux switch-client -t "$pane" 2>/dev/null || { bellmux prune-pane --pane-id "$pane"; tmux display-message "Pane no longer exists, pruned."; }; if [ "$tag" = wrapped ]; then tmux display-message "全通知を一周しました"; fi; fi'
+    ```
+- `bellmux bell` コマンドを通知が必要なタイミングで呼ぶことで、現在ログイン中の tty 全てにベルを鳴らします
+  - 名前の由来にもなっている機能で、別 tmux セッションや別ターミナルタブで作業していてもベルが鳴りますが、OS の音再生コマンドを使用するのがおすすめです
+    ```sh
+    # macOS
+    afplay /System/Library/Sounds/Glass.aiff
+    # Linux
+    ...
+    # WSL2
+    ...
+    ```
 
 ## 動作要件
 
 - Rust 1.74+（`cargo build` 用）
 - tmux 3.2+ 推奨（`fullbar` プリセットが `#{?#(...),T,F}` 条件式スタイルを使用、必要バージョンは 2.9 以降）
-- Claude Code CLI（hook 連携用）
+
+Claude Code は optional です。最も磨き込まれた integration ではありますが、bellmux は Claude Code なしでも動きます。
 
 ## インストール
 
@@ -117,28 +184,32 @@ cargo build --release
 ln -s "$(pwd)/target/release/bellmux" ~/.local/bin/bellmux   # PATH 上の任意のディレクトリでも可
 ```
 
-## セットアップ
+## クイックスタート：Claude Code
 
-同梱の全スニペットを出力：
-
-```sh
-bellmux init
-```
-
-プリセット単体で取り出すこともできます：
+bellmux には Claude Code 用の first-party hook が同梱されています：
 
 ```sh
-bellmux init --preset fullbar         # ステータスバー全体を 2 色フリップ
-bellmux init --preset widget          # 右端の小さなウィジェット
-bellmux init --preset overlay         # 上流色を破壊しない overlay
-bellmux init --preset dot             # 単一ドット
-bellmux init --preset keybinds        # ジャンプ / ack のキーバインド
-bellmux init --preset popup-enriched  # session:window.pane title で enrich された popup
-bellmux init --preset tmux-hook       # pane-died → prune の tmux hook
-bellmux init --preset claude-hooks    # Claude Code hook（~/.claude/settings.json 用）
+bellmux init --preset claude-hooks    # → ~/.claude/settings.json
+bellmux init --preset fullbar         # → ~/.tmux.conf  （widget / overlay / dot でも可）
+bellmux init --preset keybinds        # → ~/.tmux.conf
 ```
 
-該当ブロックを `~/.tmux.conf` に貼って `tmux source-file ~/.tmux.conf`、Claude Code 用は `~/.claude/settings.json` に貼って Claude Code を再起動してください。
+適用後、`tmux source-file ~/.tmux.conf` と Claude Code 再起動。
+
+## 他のツールと組み合わせる
+
+`bellmux push` は素の CLI です。tmux ペインの中から shell 一行で呼び出せます。`$TMUX_PANE` は tmux ペインの環境変数として自動で入っています：
+
+```sh
+# 長時間タスクの完了通知
+make build; bellmux push --kind stop --pane-id "$TMUX_PANE" && bellmux bell
+
+# カスタムメッセージ付き（popup や list 出力に反映される）
+gh run watch $run_id; echo '{"message":"CI done"}' \
+  | bellmux push --kind notification --pane-id "$TMUX_PANE" && bellmux bell
+```
+
+`push` は記録のみ、`bell` はベルを鳴らすだけ。両方欲しいときは `&&` で繋ぐ、ステータスバー色変化だけで十分なら `bell` を省く、で制御できます。ack はデフォルトで `prefix+A`、あるいは `bellmux ack-pane --pane-id %N` でスクリプト化できます。
 
 ## デフォルトキーバインド
 
@@ -167,9 +238,24 @@ bellmux bell                                                   # 自分のログ
 bellmux init       [--preset <name>]                           # セットアップスニペット出力
 ```
 
+## スニペット
+
+`bellmux init` で全スニペットを一括出力。個別に取りたい場合：
+
+```sh
+bellmux init --preset fullbar         # ステータスバー全体を 2 色フリップ
+bellmux init --preset widget          # 右端の小さなウィジェット
+bellmux init --preset overlay         # 上流色を破壊しない overlay
+bellmux init --preset dot             # 単一ドット
+bellmux init --preset keybinds        # ジャンプ / ack のキーバインド
+bellmux init --preset popup-enriched  # session:window.pane title で enrich された popup
+bellmux init --preset tmux-hook       # pane-died → prune の tmux hook
+bellmux init --preset claude-hooks    # Claude Code hook（~/.claude/settings.json 用）
+```
+
 ## 仕組み
 
-実装の俯瞰は [`CLAUDE.md`](CLAUDE.md)、設計判断の根拠・トレードオフ・試行錯誤の経緯（特に tmux statusbar / border の挙動回り）は [`DESIGN.md`](DESIGN.md) を参照してください。
+Rust 単一バイナリ、常駐プロセスなし。状態は小さな SQLite ファイルに持ちますが、SQLite 自身はバイナリに静的リンクされているため、bellmux と tmux 以外にインストールするものはありません。実装の俯瞰は [`CLAUDE.md`](CLAUDE.md)、設計判断の根拠・トレードオフ・試行錯誤の経緯（特に tmux statusbar / border の挙動回り）は [`DESIGN.md`](DESIGN.md) を参照してください。
 
 ## ライセンス
 
