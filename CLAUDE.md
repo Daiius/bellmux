@@ -78,7 +78,7 @@ bellmux init       [--preset <name>]                             # tmux/hook ス
 - **popup preset**: `popup-simple`（`list | less`）/ `popup-enriched`（TSV + `tmux display-message` で `session:window.pane title` に enrich）
 - **keybinds**: `prefix+a` `next` ジャンプ（最頻動作なので小文字）、`prefix+b` `prev` ジャンプ（逆方向）、`prefix+A` 現在ペイン ack、`prefix+X` 全 ack。ack 系は `tmux refresh-client -S` で即時反映
 - **tmux-hook**: `pane-died` → `prune-pane`
-- **claude-hooks**: `~/.claude/settings.json` に貼る JSON。Notification / Stop は `bellmux push ...`、UserPromptSubmit は `bellmux ack-pane ...`。`push` 内で bell も発火（ただし idle notification は suppress）。statusbar の refresh は tmux の status-interval poll に任せる（素朴・stable）。`bellmux bell` は tmux 非依存で全クライアントの outer tty に直接 BEL を送るため、別セッションで作業中でも気付ける
+- **claude-hooks**: `~/.claude/settings.json` に貼る JSON。Notification / Stop は `bellmux push ...`、UserPromptSubmit は `bellmux ack-pane ...`。`push` 内で bell も発火（ただし idle notification は suppress）。statusbar の refresh は tmux の status-interval poll に任せる（素朴・stable）。bell は push 同期、statusbar は次のポーリングなので最大 status-interval 秒のズレはあり得る（許容）。`bellmux bell` は tmux 非依存で全クライアントの outer tty に直接 BEL を送るため、別セッションで作業中でも気付ける
 
 `fullbar` は `@bellmux-status-normal` / `@bellmux-status-notify` の 2 つの user option を tmux.conf 先頭で明示宣言する方式。上流値を snapshot 取得する方式は多重 `source-file` で自己参照ループのリスクがあり廃止した（`DESIGN.md` 参照）。
 
