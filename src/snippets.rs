@@ -72,10 +72,33 @@ pub const KEYBINDS: &str = r##"# --- bellmux keybindings ---
 # the advance crossed the cycle boundary (one pass done) or only one pane
 # is pending (every press revisits it). The keybind uses that tag to show
 # a "cycled through all" message via display-message.
-bind-key a run-shell 'read -r pane tag <<<"$(bellmux next)"; if [ -n "$pane" ]; then tmux switch-client -t "$pane" 2>/dev/null || { bellmux prune-pane --pane-id "$pane"; tmux display-message "Pane no longer exists, pruned."; }; if [ "$tag" = wrapped ]; then tmux display-message "Cycled through all pending notifications."; fi; fi'
+#
+# Dead panes are pruned by the pane-died hook (see tmux-hook preset), so
+# we don't handle that case explicitly here.
+bind-key a run-shell '
+  read -r pane tag <<<"$(bellmux next)"
+  if [ -z "$pane" ]; then
+    tmux display-message "No pending notifications"
+    exit 0
+  fi
+  tmux switch-client -t "$pane"
+  if [ "$tag" = wrapped ]; then
+    tmux display-message "Cycled through all pending notifications."
+  fi
+'
 
 # Jump to the previous pending notification (opposite direction).
-bind-key b run-shell 'read -r pane tag <<<"$(bellmux prev)"; if [ -n "$pane" ]; then tmux switch-client -t "$pane" 2>/dev/null || { bellmux prune-pane --pane-id "$pane"; tmux display-message "Pane no longer exists, pruned."; }; if [ "$tag" = wrapped ]; then tmux display-message "Cycled through all pending notifications."; fi; fi'
+bind-key b run-shell '
+  read -r pane tag <<<"$(bellmux prev)"
+  if [ -z "$pane" ]; then
+    tmux display-message "No pending notifications"
+    exit 0
+  fi
+  tmux switch-client -t "$pane"
+  if [ "$tag" = wrapped ]; then
+    tmux display-message "Cycled through all pending notifications."
+  fi
+'
 
 # Ack all notifications for the current pane (use when you saw it but won't reply).
 bind-key A run-shell 'bellmux ack-pane --pane-id "#{pane_id}" && tmux refresh-client -S'

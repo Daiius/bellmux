@@ -10,11 +10,98 @@ Claude Code hooks were the original driver (every turn-end and tool-permission p
 
 ## What it does for you
 
-While anything is pending, bellmux surfaces it via:
+bellmux surfaces pending notifications and lets you cycle back to the tmux sessions and panes that raised them:
 
-- A coloured tmux status bar that lights up while anything is pending
-- A terminal bell delivered to your active login ttys (so it reaches you across tmux sessions and terminal tabs)
-- Keybindings to cycle through every pane that's waiting on you
+- `bellmux status` reports whether anything is pending.
+  - Poll it from tmux's `status-interval` to flip the status bar colour, or to drive any other visual effect while notifications are pending:
+    ```sh
+    # --- bellmux status preset: fullbar ---
+    # Flip the whole status bar to a notify colour while notifications are pending.
+    # Two explicit colours: @bellmux-status-normal / @bellmux-status-notify.
+    # Border is left untouched (tmux re-renders borders only on focus/layout
+    # events, so a conditional border style would lag behind status).
+    # Requires tmux >= 2.9 for #{?#(...),T,F} conditional in styles.
+    set -g status-interval 2
+    set -g @bellmux-status-normal 'bg=green fg=black'
+    set -g @bellmux-status-notify 'bg=colour208 fg=black'
+    set -g status-style '#{?#(bellmux status),#{@bellmux-status-notify},#{@bellmux-status-normal}}'
+    set -g status-right '#(bellmux status --format="{n}: {latest_message}") | %H:%M '
+    ```
+- `bellmux next` and `bellmux prev` walk pending notifications in order and print a `pane_id`.
+  - Bind a tmux key to feed the output into `switch-client -t`, and you can jump to the session:pane that produced the notification:
+    ```sh
+    # --- bellmux keybindings ---
+    # Jump to the next pending notification in cycle order (does NOT ack).
+    # First press enters at the newest pending pane, subsequent presses walk older.
+    # `bellmux next` appends ` wrapped` when the cycle completes or only one
+    # pane is pending — we surface that via display-message.
+    # Dead panes are pruned by the pane-died hook (tmux-hook preset), so no
+    # explicit fallback needed here.
+    bind-key a run-shell '
+      read -r pane tag <<<"$(bellmux next)"
+      if [ -z "$pane" ]; then
+        tmux display-message "No pending notifications"
+        exit 0
+      fi
+      tmux switch-client -t "$pane"
+      if [ "$tag" = wrapped ]; then
+        tmux display-message "Cycled through all pending notifications."
+      fi
+    '
+    ```
+- `bellmux bell` writes BEL (`\x07`) to every login tty of the current user.
+  - The "bell" in bellmux — alerts reach you even from another tmux session or another terminal tab. Pair it with an OS sound command for richer audio:
+    ```sh
+    # macOS
+    afplay /System/Library/Sounds/Glass.aiff
+    # Linux
+    ...
+    # WSL2
+    ...
+    ```
+- `bellmux push --pane-id <%N>` records a notification against a pane (stdin accepts optional JSON with a `message` field).
+  - Wire it into Claude Code hooks so every turn-end and tool-permission prompt fires a notification automatically. Merge into `~/.claude/settings.json`:
+    ```json
+    {
+      "hooks": {
+        "Notification": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+        }],
+        "Stop": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+        }]
+      }
+    }
+    ```
+  - Or append it to any long-running command in a tmux pane (`$TMUX_PANE` is set automatically by tmux) so completion fires a notification + bell:
+    ```sh
+    make build; bellmux push --kind stop --pane-id "$TMUX_PANE" && bellmux bell
+    gh run watch $run_id; echo '{"message":"CI done"}' \
+      | bellmux push --kind notification --pane-id "$TMUX_PANE" && bellmux bell
+    ```
+- `bellmux ack-pane --pane-id <%N>` and `bellmux ack-all` clear pending notifications for one pane or everything.
+  - Wire them into Claude Code hooks to auto-ack whenever the user resumes the session. `UserPromptSubmit` fires the moment a new prompt is typed; `PostToolUse` is the only reliable signal that the user approved a permission dialog (`PreToolUse` fires *before* the dialog, and Claude Code fires no hook at all on "Deny"):
+    ```json
+    {
+      "hooks": {
+        "UserPromptSubmit": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+        }],
+        "PostToolUse": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+        }]
+      }
+    }
+    ```
+  - For manual ack, bind a tmux key. `tmux refresh-client -S` makes the status bar flip back immediately instead of waiting for the next `status-interval` poll:
+    ```sh
+    bind-key A run-shell 'bellmux ack-pane --pane-id "#{pane_id}" && tmux refresh-client -S'
+    bind-key X run-shell 'bellmux ack-all && tmux refresh-client -S'
+    ```
 
 ## Requirements
 
@@ -157,7 +244,19 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
     # First press enters at the newest pending pane, subsequent presses walk older.
     # `bellmux next` appends ` wrapped` when the cycle completes or only one
     # pane is pending — we surface that via display-message.
-    bind-key a run-shell 'read -r pane tag <<<"$(bellmux next)"; if [ -n "$pane" ]; then tmux switch-client -t "$pane" 2>/dev/null || { bellmux prune-pane --pane-id "$pane"; tmux display-message "Pane no longer exists, pruned."; }; if [ "$tag" = wrapped ]; then tmux display-message "全通知を一周しました"; fi; fi'
+    # Dead panes are pruned by the pane-died hook (tmux-hook preset), so no
+    # explicit fallback needed here.
+    bind-key a run-shell '
+      read -r pane tag <<<"$(bellmux next)"
+      if [ -z "$pane" ]; then
+        tmux display-message "No pending notifications"
+        exit 0
+      fi
+      tmux switch-client -t "$pane"
+      if [ "$tag" = wrapped ]; then
+        tmux display-message "Cycled through all pending notifications."
+      fi
+    '
     ```
 - `bellmux bell` コマンドを通知が必要なタイミングで呼ぶことで、現在ログイン中の tty 全てにベルを鳴らします
   - 名前の由来にもなっている機能で、別 tmux セッションや別ターミナルタブで作業していてもベルが鳴りますが、OS の音再生コマンドを使用するのがおすすめです
@@ -168,6 +267,49 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
     ...
     # WSL2
     ...
+    ```
+- `bellmux push --pane-id <%N>` コマンドで通知を記録します（stdin: 任意の JSON、`message` field を抽出）
+  - Claude Code の hook と組み合わせると、ターン完了やツール許可要求のたびに自動で push + bell が発火します。`~/.claude/settings.json` の内容にマージしてください：
+    ```json
+    {
+      "hooks": {
+        "Notification": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+        }],
+        "Stop": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+        }]
+      }
+    }
+    ```
+  - 任意の長時間コマンドに連結すれば、完了時に通知 + bell を飛ばせます（`$TMUX_PANE` は tmux が自動で入れる環境変数）：
+    ```sh
+    make build; bellmux push --kind stop --pane-id "$TMUX_PANE" && bellmux bell
+    gh run watch $run_id; echo '{"message":"CI done"}' \
+      | bellmux push --kind notification --pane-id "$TMUX_PANE" && bellmux bell
+    ```
+- `bellmux ack-pane --pane-id <%N>` / `bellmux ack-all` コマンドで通知を消去します
+  - Claude Code の hook から呼ぶと、ユーザーが操作を再開した瞬間に自動 ack できます。`UserPromptSubmit` は新しいプロンプトが送信されたタイミング、`PostToolUse` はツール許可ダイアログで "Allow" が押された唯一の確定シグナルです（`PreToolUse` はダイアログ *前* に発火し、"Deny" の場合はそもそも hook が鳴らない）：
+    ```json
+    {
+      "hooks": {
+        "UserPromptSubmit": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+        }],
+        "PostToolUse": [{
+          "matcher": "",
+          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+        }]
+      }
+    }
+    ```
+  - 手動 ack は tmux のキーバインドで。`tmux refresh-client -S` を付けるとステータスバーの色戻りが次の `status-interval` を待たず即時になります：
+    ```sh
+    bind-key A run-shell 'bellmux ack-pane --pane-id "#{pane_id}" && tmux refresh-client -S'
+    bind-key X run-shell 'bellmux ack-all && tmux refresh-client -S'
     ```
 
 ## 動作要件
