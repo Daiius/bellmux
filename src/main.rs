@@ -138,11 +138,14 @@ fn should_suppress(kind: Kind, message: Option<&str>, notification_type: Option<
     if !matches!(kind, Kind::Notification) {
         return false;
     }
-    // Newer Claude Code versions ship `notification_type`. When present, only
-    // `permission_prompt` is surfaced; any other kind (idle pings etc.) is
-    // dropped. Substring-match on `message` stays as a fallback.
+    // Newer Claude Code versions ship `notification_type`. When present, we
+    // surface the kinds that mean "this pane is waiting on the user":
+    // `permission_prompt` (a tool permission dialog) and `elicitation_dialog`
+    // (an MCP server requesting input mid-tool). Any other kind (idle pings,
+    // auth_success, elicitation_complete, ...) is dropped. Substring-match on
+    // `message` stays as a fallback for older Claude Code without the field.
     if let Some(nt) = notification_type {
-        return nt != "permission_prompt";
+        return !matches!(nt, "permission_prompt" | "elicitation_dialog");
     }
     let Some(msg) = message else { return false };
     let msg_lower = msg.to_ascii_lowercase();
@@ -345,6 +348,17 @@ mod tests {
             Kind::Notification,
             Some("Claude needs your permission to use Bash"),
             Some("permission_prompt"),
+        ));
+    }
+
+    #[test]
+    fn notification_type_surfaces_elicitation_dialog() {
+        // An MCP server requesting input mid-tool needs the user's attention,
+        // same as a permission prompt, so it must not be suppressed.
+        assert!(!should_suppress(
+            Kind::Notification,
+            Some("MCP server requests your input"),
+            Some("elicitation_dialog"),
         ));
     }
 
