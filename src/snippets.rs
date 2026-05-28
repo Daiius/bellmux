@@ -135,6 +135,10 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 #     stuck. Acking here also clears any pending notification for the pane
 #     whenever Claude is actively running tools, which matches the "Claude is
 #     working, don't nag me" intent.
+#   - SessionEnd: the Claude session ended (/clear, logout, or exiting Claude
+#     while the tmux pane lives on). Clear pending so a stale notification does
+#     not ghost until the pane itself dies (the pane-died tmux hook only fires
+#     when the pane actually closes).
 {
   "hooks": {
     "Notification": [{
@@ -166,6 +170,13 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
       }]
     }],
     "PostToolUseFailure": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+      }]
+    }],
+    "SessionEnd": [{
       "matcher": "",
       "hooks": [{
         "type": "command",

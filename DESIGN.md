@@ -35,8 +35,11 @@ Claude hook との対応：
 | UserPromptSubmit | ユーザーが応答 | `ack-pane` |
 | PostToolUse | ツール実行完了（成功） | `ack-pane` |
 | PostToolUseFailure | ツール実行完了（失敗） | `ack-pane` |
+| SessionEnd | セッション終了（/clear, logout, 終了等） | `ack-pane` |
 
 加えて `prefix + a`（現在ペイン）/ `prefix + X`（全体）で手動 ack。
+
+SessionEnd でも ack する: `/clear`・logout・Claude の終了でセッションが終わってもペインは生き残ることがあり、その間 Stop 等の通知が残留する。`pane-died` hook はペインが実際に閉じた時しか発火しないため取りこぼす。SessionEnd で締めることで「セッションが終わった ≡ そのペインの未応答通知は無効」を表現する。
 
 ### ベルコマンドの分離
 
