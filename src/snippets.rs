@@ -187,8 +187,78 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 }
 "##;
 
+pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
+# Add the JSON object below to ~/.codex/hooks.json. If the file already
+# exists, merge the top-level "hooks" object; do not overwrite unrelated hooks.
+# Codex passes the hook payload on stdin. The push hooks below intentionally
+# pipe a small fixed JSON object into bellmux instead, so Codex prompts and
+# hook payloads are not stored in bellmux. $TMUX_PANE is inherited by hook
+# subprocesses when Codex runs inside tmux.
+#
+# Codex hook trust:
+#   Non-managed command hooks must be reviewed and trusted before they run.
+#   Use /hooks in Codex after adding this file.
+#
+# Notification policy:
+#   - PermissionRequest: Codex is about to ask for approval; surface it.
+#   - Stop: assistant turn completed; surface it.
+#
+# Ack policy:
+#   - UserPromptSubmit: user typed a new prompt; clear pending for this pane.
+#   - PostToolUse: a tool completed, including non-zero Bash exits in current
+#     Codex releases; clear any stale approval notification for this pane.
+#   - SessionStart startup/resume/clear: Codex does not currently expose a
+#     SessionEnd hook, so clear stale pane notifications when a Codex session
+#     starts or resumes in the pane. This is close to SessionEnd cleanup in
+#     practice: the next time the user returns to that pane, stale work is no
+#     longer advertised.
+{
+  "hooks": {
+    "PermissionRequest": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "printf '%s' '{\"message\":\"Codex needs approval\"}' | bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell",
+        "statusMessage": "Recording bellmux approval notification"
+      }]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "printf '%s' '{\"message\":\"Codex turn complete\"}' | bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell",
+        "statusMessage": "Recording bellmux turn notification"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "statusMessage": "Clearing bellmux notification"
+      }]
+    }],
+    "PostToolUse": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "statusMessage": "Clearing bellmux tool notification"
+      }]
+    }],
+    "SessionStart": [{
+      "matcher": "startup|resume|clear",
+      "hooks": [{
+        "type": "command",
+        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "statusMessage": "Clearing stale bellmux notification"
+      }]
+    }]
+  }
+}
+"##;
+
 pub fn all() -> String {
-    let header = "# Add the snippets below to ~/.tmux.conf\n# (and the Claude Code hooks block to ~/.claude/settings.json).\n# Then: `tmux source-file ~/.tmux.conf` and restart any running Claude Code sessions.\n\n";
+    let header = "# Add the snippets below to ~/.tmux.conf\n# (and the coding-agent hooks blocks to their user config files).\n# Then: `tmux source-file ~/.tmux.conf` and restart any running agent sessions.\n\n";
     let mut out = String::new();
     out.push_str(header);
     out.push_str(WIDGET);
@@ -208,6 +278,8 @@ pub fn all() -> String {
     out.push_str(TMUX_HOOK);
     out.push_str("\n# --- Claude Code hooks (paste into ~/.claude/settings.json) ---\n");
     out.push_str(CLAUDE_HOOKS);
+    out.push_str("\n# --- Codex hooks (paste into ~/.codex/hooks.json) ---\n");
+    out.push_str(CODEX_HOOKS);
     out
 }
 
@@ -222,6 +294,7 @@ pub fn by_name(name: &str) -> Option<&'static str> {
         "keybinds" => Some(KEYBINDS),
         "tmux-hook" => Some(TMUX_HOOK),
         "claude-hooks" => Some(CLAUDE_HOOKS),
+        "codex-hooks" => Some(CODEX_HOOKS),
         _ => None,
     }
 }

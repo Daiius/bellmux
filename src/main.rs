@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::process::Command;
 
-const ABOUT: &str = "Minimal notification layer bridging Claude Code hooks, tmux, and SQLite.";
+const ABOUT: &str = "Minimal notification layer bridging coding-agent hooks, tmux, and SQLite.";
 
 #[derive(Parser)]
 #[command(name = "bellmux", version, about = ABOUT)]
@@ -63,10 +63,10 @@ enum Cmd {
     /// Reaches the outer terminal regardless of tmux session/client topology.
     /// Best-effort: silently skips ttys we cannot open.
     Bell,
-    /// Print setup snippets for tmux/Claude Code.
+    /// Print setup snippets for tmux/coding-agent hooks.
     Init {
         /// One of: widget, fullbar, overlay, dot, popup-simple,
-        /// popup-enriched, keybinds, tmux-hook, claude-hooks.
+        /// popup-enriched, keybinds, tmux-hook, claude-hooks, codex-hooks.
         /// Omit to print everything.
         #[arg(long)]
         preset: Option<String>,
