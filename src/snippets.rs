@@ -126,12 +126,15 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 #
 # Ack policy:
 #   - UserPromptSubmit: user typed a new prompt — clear pending.
-#   - PostToolUse: a tool just finished. This is the only reliable signal that
-#     the user responded "Allow" to a permission dialog (PreToolUse fires
-#     *before* the dialog; Claude Code fires no hook at all on "Deny"). Acking
-#     here also clears any pending notification for the pane whenever Claude
-#     is actively running tools, which matches the "Claude is working, don't
-#     nag me" intent.
+#   - PostToolUse / PostToolUseFailure: a tool just finished. This is the only
+#     reliable signal that the user responded "Allow" to a permission dialog
+#     (PreToolUse fires *before* the dialog; Claude Code fires no hook at all
+#     on "Deny"). Claude Code splits tool completion into two events — success
+#     fires PostToolUse, failure fires PostToolUseFailure — so we ack on both;
+#     otherwise a tool that fails right after "Allow" leaves the notification
+#     stuck. Acking here also clears any pending notification for the pane
+#     whenever Claude is actively running tools, which matches the "Claude is
+#     working, don't nag me" intent.
 {
   "hooks": {
     "Notification": [{
@@ -156,6 +159,13 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
       }]
     }],
     "PostToolUse": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+      }]
+    }],
+    "PostToolUseFailure": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
