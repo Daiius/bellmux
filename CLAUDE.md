@@ -8,7 +8,7 @@ Coding-agent hook, tmux, SQLite の 3 点を結ぶ最小限の通知レイヤ。
 
 | File | 役割 |
 |---|---|
-| `src/main.rs` | CLI エントリ（clap derive）。サブコマンドを `cmd_*` にディスパッチ、`push` 用 stdin JSON パース（top-level `message` / `notification_type` のみ抽出）。 |
+| `src/main.rs` | CLI エントリ（clap derive）。サブコマンドを `cmd_*` にディスパッチ、`push` 用 stdin JSON パース（top-level `message` のみ抽出、表示用）。 |
 | `src/db.rs` | SQLite open (WAL + busy_timeout=3s)、`notifications` / `meta` テーブルの CRUD、cursor accessor、`ordered_panes` / `next_pane` / `prev_pane`、`StatusSnapshot`、`relative_time`、`sanitize_message`、DB パス解決。 |
 | `src/format.rs` | `status --format` のテンプレートエンジン。`{n}` / `{latest_message}` / `{latest_pane}`。`n==0` なら空文字列を返す（tmux 条件式の false 判定に使う）。 |
 | `src/validate.rs` | `pane_id` 検証 (`^%[0-9]+$`)。 |
@@ -31,7 +31,7 @@ Border style は意図的にフリップしない。tmux は border を focus/la
 ## CLI
 
 ```
-bellmux push       --kind <notification|stop> --pane-id <%N>    # stdin: 任意の JSON（top-level `message` / `notification_type` のみ抽出、非 JSON でも OK）。記録のみ、bell は鳴らさない（呼び出し側で `&& bellmux bell` を連結する）。suppress 対象の Claude Notification（`notification_type` が `permission_prompt` / `elicitation_dialog` のいずれでもない、または legacy fallback で message に "waiting for your input" を含む）は記録もせず exit 3 で終了 → `&&` 連結で bell も skip
+bellmux push       --kind <notification|stop> --pane-id <%N>    # stdin: 任意の JSON（top-level `message` のみ抽出、非 JSON でも OK）。記録のみ、bell は鳴らさない（呼び出し側で `&& bellmux bell` を連結）。受け取った通知は常に記録する（surface 対象の選別は hook matcher が担うため push 側に suppress 判定は無い）
 bellmux ack-pane   --pane-id <%N>                               # そのペインの通知を全 DELETE
 bellmux ack-all                                                  # 全通知を DELETE
 bellmux prune-pane --pane-id <%N>                                # ack-pane と同じ動作、pane-died hook 用の別名
@@ -79,7 +79,7 @@ bellmux init       [--preset <name>]                             # tmux/hook ス
 - **popup preset**: `popup-simple`（`list | less`）/ `popup-enriched`（TSV + `tmux display-message` で `session:window.pane title` に enrich）
 - **keybinds**: `prefix+a` `next` ジャンプ（最頻動作なので小文字）、`prefix+b` `prev` ジャンプ（逆方向）、`prefix+A` 現在ペイン ack、`prefix+X` 全 ack。ack 系は `tmux refresh-client -S` で即時反映
 - **tmux-hook**: `pane-died` → `prune-pane`
-- **claude-hooks**: `~/.claude/settings.json` に貼る JSON。Notification / Stop は `bellmux push ... && bellmux bell`、UserPromptSubmit / **PostToolUse** / **PostToolUseFailure** / **SessionEnd** は `bellmux ack-pane ...`。`push` 自身は bell を鳴らさず suppress 時 exit 3 → `&&` で後段の bell コマンドを自然に skip。この分離で後段を `afplay` / `terminal-notifier` / `osascript` 等のカスタム通知手段に差し替えられる。PostToolUse ack は permission dialog で "Allow" を押した後の唯一の確定シグナル（PreToolUse はダイアログ前に発火、"Deny" はフックなし）。Claude Code はツール完了を成功＝PostToolUse / 失敗＝PostToolUseFailure の 2 イベントに分けるため**両方**で ack する（"Allow" 直後にツールが失敗すると PostToolUse は発火せず通知が残るため）。SessionEnd ack は `/clear`・logout・Claude 終了でペインが生き残るケースの通知ゴーストを防ぐ（`pane-died` はペインが実際に閉じた時しか発火しないため）。
+- **claude-hooks**: `~/.claude/settings.json` に貼る JSON。Notification は matcher を `permission_prompt|elicitation_dialog` に絞り（surface 対象の選別は hook matcher が担う。idle ping 等は matcher 不一致で hook 自体が発火しない）、Stop と共に `bellmux push ... && bellmux bell`、UserPromptSubmit / **PostToolUse** / **PostToolUseFailure** / **SessionEnd** は `bellmux ack-pane ...`。`push` は記録のみで bell を鳴らさず、成功時のみ後段が走る。この分離で後段を `afplay` / `terminal-notifier` / `osascript` 等のカスタム通知手段に差し替えられる。PostToolUse ack は permission dialog で "Allow" を押した後の唯一の確定シグナル（PreToolUse はダイアログ前に発火、"Deny" はフックなし）。Claude Code はツール完了を成功＝PostToolUse / 失敗＝PostToolUseFailure の 2 イベントに分けるため**両方**で ack する（"Allow" 直後にツールが失敗すると PostToolUse は発火せず通知が残るため）。SessionEnd ack は `/clear`・logout・Claude 終了でペインが生き残るケースの通知ゴーストを防ぐ（`pane-died` はペインが実際に閉じた時しか発火しないため）。
 - **codex-hooks**: `~/.codex/hooks.json` に貼る JSON。PermissionRequest / Stop は固定の短い `{"message": ...}` を pipe してから `bellmux push ... && bellmux bell`、UserPromptSubmit / PostToolUse / SessionStart(startup|resume|clear) は `bellmux ack-pane ...`。Codex は command hook に入力プロンプト等を含み得る JSON を stdin で渡すため、その payload は bellmux に読ませない。Codex には現時点で Claude Code の SessionEnd 相当 hook がないため、SessionStart で stale 通知を掃除する。
 
 statusbar の refresh は tmux の status-interval poll に任せる（素朴・stable）。bell は push 同期、statusbar は次のポーリングなので最大 status-interval 秒のズレはあり得る（許容）。`bellmux bell` は tmux 非依存で全クライアントの outer tty に直接 BEL を送るため、別セッションで作業中でも気付ける

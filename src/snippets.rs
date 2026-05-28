@@ -118,11 +118,19 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 # automatically and inherited by the Claude Code hook subprocess.
 #
 # Customising the alert sound:
-#   `bellmux push ... && bellmux bell` fires BEL on every login tty after a
-#   successful push. `bellmux push` exits 3 when a notification is suppressed
-#   (e.g. idle ping), so `&&` naturally skips the bell in that case. Replace
-#   `bellmux bell` with anything: `afplay /System/Library/Sounds/Ping.aiff`,
+#   `bellmux push ... && bellmux bell` records the notification, then rings BEL
+#   on every login tty. Replace `bellmux bell` with anything:
+#   `afplay /System/Library/Sounds/Ping.aiff`,
 #   `osascript -e 'display notification "..."'`, `terminal-notifier ...`, etc.
+#
+# Notification policy:
+#   The Notification matcher picks which notification types reach bellmux. We
+#   surface only `permission_prompt` (a tool permission dialog) and
+#   `elicitation_dialog` (an MCP server requesting input mid-tool) — both mean
+#   "this pane is waiting on you". Idle pings, auth_success, and the like never
+#   match, so Claude Code never runs the hook for them and bellmux stays
+#   agent-agnostic: it records whatever it is handed. Add more types to the
+#   matcher (|-separated) to surface them.
 #
 # Ack policy:
 #   - UserPromptSubmit: user typed a new prompt — clear pending.
@@ -142,7 +150,7 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 {
   "hooks": {
     "Notification": [{
-      "matcher": "",
+      "matcher": "permission_prompt|elicitation_dialog",
       "hooks": [{
         "type": "command",
         "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"
