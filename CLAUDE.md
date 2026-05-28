@@ -30,7 +30,7 @@ Border style は意図的にフリップしない。tmux は border を focus/la
 ## CLI
 
 ```
-bellmux push       --kind <notification|stop> --pane-id <%N>    # stdin: 任意の JSON（`message` / `notification_type` field を抽出、非 JSON でも OK）。記録のみ、bell は鳴らさない（呼び出し側で `&& bellmux bell` を連結する）。suppress 対象の Notification（`notification_type != permission_prompt`、または legacy fallback で message に "waiting for your input" を含む）は記録もせず exit 3 で終了 → `&&` 連結で bell も skip
+bellmux push       --kind <notification|stop> --pane-id <%N>    # stdin: 任意の JSON（`message` / `notification_type` field を抽出、非 JSON でも OK）。記録のみ、bell は鳴らさない（呼び出し側で `&& bellmux bell` を連結する）。suppress 対象の Notification（`notification_type` が `permission_prompt` / `elicitation_dialog` のいずれでもない、または legacy fallback で message に "waiting for your input" を含む）は記録もせず exit 3 で終了 → `&&` 連結で bell も skip
 bellmux ack-pane   --pane-id <%N>                               # そのペインの通知を全 DELETE
 bellmux ack-all                                                  # 全通知を DELETE
 bellmux prune-pane --pane-id <%N>                                # ack-pane と同じ動作、pane-died hook 用の別名
