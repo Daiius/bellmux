@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::process::Command;
 
-const ABOUT: &str = "Minimal notification layer bridging Claude Code hooks, tmux, and SQLite.";
+const ABOUT: &str = "Minimal notification layer bridging coding-agent hooks, tmux, and SQLite.";
 
 #[derive(Parser)]
 #[command(name = "bellmux", version, about = ABOUT)]
@@ -63,10 +63,10 @@ enum Cmd {
     /// Reaches the outer terminal regardless of tmux session/client topology.
     /// Best-effort: silently skips ttys we cannot open.
     Bell,
-    /// Print setup snippets for tmux/Claude Code.
+    /// Print setup snippets for tmux/coding-agent hooks.
     Init {
         /// One of: widget, fullbar, overlay, dot, popup-simple,
-        /// popup-enriched, keybinds, tmux-hook, claude-hooks.
+        /// popup-enriched, keybinds, tmux-hook, claude-hooks, codex-hooks.
         /// Omit to print everything.
         #[arg(long)]
         preset: Option<String>,
@@ -113,45 +113,16 @@ fn run(cli: Cli) -> Result<()> {
 
 fn cmd_push(pane_id: &str, kind: Kind) -> Result<()> {
     validate::pane_id(pane_id)?;
-    let payload = read_stdin_payload();
-    if should_suppress(kind, payload.message.as_deref(), payload.notification_type.as_deref()) {
-        // Exit 3 signals "valid input, deliberately skipped" so that the hook
-        // snippet `bellmux push ... && bellmux bell` does not fire the bell.
-        std::process::exit(3);
-    }
+    let message = read_stdin_message();
     let conn = db::open()?;
     db::insert(
         &conn,
         &db::now_iso8601(),
         pane_id,
         kind.as_str(),
-        payload.message.as_deref(),
+        message.as_deref(),
     )?;
     Ok(())
-}
-
-/// Legacy message substrings used when the Notification payload does not
-/// include `notification_type` (older Claude Code versions).
-const NOTIFICATION_SUPPRESS_PATTERNS: &[&str] = &["waiting for your input"];
-
-fn should_suppress(kind: Kind, message: Option<&str>, notification_type: Option<&str>) -> bool {
-    if !matches!(kind, Kind::Notification) {
-        return false;
-    }
-    // Newer Claude Code versions ship `notification_type`. When present, we
-    // surface the kinds that mean "this pane is waiting on the user":
-    // `permission_prompt` (a tool permission dialog) and `elicitation_dialog`
-    // (an MCP server requesting input mid-tool). Any other kind (idle pings,
-    // auth_success, elicitation_complete, ...) is dropped. Substring-match on
-    // `message` stays as a fallback for older Claude Code without the field.
-    if let Some(nt) = notification_type {
-        return !matches!(nt, "permission_prompt" | "elicitation_dialog");
-    }
-    let Some(msg) = message else { return false };
-    let msg_lower = msg.to_ascii_lowercase();
-    NOTIFICATION_SUPPRESS_PATTERNS
-        .iter()
-        .any(|p| msg_lower.contains(&p.to_ascii_lowercase()))
 }
 
 fn cmd_ack_pane(pane_id: &str) -> Result<()> {
@@ -278,31 +249,20 @@ fn cmd_init(preset: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
-struct StdinPayload {
-    message: Option<String>,
-    notification_type: Option<String>,
-}
-
-fn read_stdin_payload() -> StdinPayload {
+/// Extract the optional top-level `message` string from stdin JSON, for
+/// display in the status bar and `list`. Returns None for empty or non-JSON
+/// stdin. bellmux interprets no other field: which events are worth surfacing
+/// is decided by the hook matcher, not here.
+fn read_stdin_message() -> Option<String> {
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
-        return StdinPayload::default();
+        return None;
     }
-    let value: serde_json::Value = match serde_json::from_str(&buf) {
-        Ok(v) => v,
-        Err(_) => return StdinPayload::default(),
-    };
-    StdinPayload {
-        message: value
-            .get("message")
-            .and_then(|v| v.as_str())
-            .map(db::sanitize_message),
-        notification_type: value
-            .get("notification_type")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-    }
+    let value: serde_json::Value = serde_json::from_str(&buf).ok()?;
+    value
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(db::sanitize_message)
 }
 
 fn print_list_human(rows: &[db::Notification]) {
@@ -335,86 +295,4 @@ fn print_list_json(rows: &[db::Notification]) {
         })
         .collect();
     println!("{}", serde_json::Value::Array(arr));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn notification_type_surfaces_permission_prompt() {
-        // permission_prompt is the only Notification kind we care about.
-        assert!(!should_suppress(
-            Kind::Notification,
-            Some("Claude needs your permission to use Bash"),
-            Some("permission_prompt"),
-        ));
-    }
-
-    #[test]
-    fn notification_type_surfaces_elicitation_dialog() {
-        // An MCP server requesting input mid-tool needs the user's attention,
-        // same as a permission prompt, so it must not be suppressed.
-        assert!(!should_suppress(
-            Kind::Notification,
-            Some("MCP server requests your input"),
-            Some("elicitation_dialog"),
-        ));
-    }
-
-    #[test]
-    fn notification_type_suppresses_other_kinds() {
-        // Any notification_type other than permission_prompt is dropped,
-        // regardless of message content. This covers idle pings and any
-        // future types we have not explicitly allow-listed.
-        assert!(should_suppress(
-            Kind::Notification,
-            Some("something important"),
-            Some("idle"),
-        ));
-        assert!(should_suppress(Kind::Notification, None, Some("unknown")));
-    }
-
-    #[test]
-    fn suppress_idle_notification_legacy_message_fallback() {
-        // When notification_type is absent (older Claude Code), fall back to
-        // the historic substring match on message.
-        assert!(should_suppress(
-            Kind::Notification,
-            Some("Claude is waiting for your input"),
-            None,
-        ));
-        assert!(should_suppress(
-            Kind::Notification,
-            Some("WAITING FOR YOUR INPUT to continue"),
-            None,
-        ));
-    }
-
-    #[test]
-    fn permission_notification_passes_legacy_fallback() {
-        assert!(!should_suppress(
-            Kind::Notification,
-            Some("Claude needs your permission to use Bash"),
-            None,
-        ));
-    }
-
-    #[test]
-    fn stop_is_never_suppressed() {
-        // Stop has no notification_type field at all; it must pass through
-        // regardless of message or fallback patterns.
-        assert!(!should_suppress(
-            Kind::Stop,
-            Some("waiting for your input"),
-            None,
-        ));
-        assert!(!should_suppress(Kind::Stop, None, Some("idle")));
-        assert!(!should_suppress(Kind::Stop, None, None));
-    }
-
-    #[test]
-    fn null_message_is_not_suppressed_without_type() {
-        assert!(!should_suppress(Kind::Notification, None, None));
-    }
 }
