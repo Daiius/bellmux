@@ -11,8 +11,14 @@
 
 pub const WIDGET: &str = r##"# --- bellmux status preset: widget ---
 # Right-side widget that lights up when notifications are pending.
+# A 🔔 badge appears when the pane you are currently looking at is the one
+# waiting on you; the orange count covers all pending panes.
+#
+# `bellmux status --only-pane #{pane_id}` prints nothing unless the active pane
+# (tmux expands #{pane_id} inside #() per client) has a pending notification, so
+# the #{?...} condition is false otherwise.
 set -g status-interval 2
-set -g status-right '#[bg=colour208,fg=black]#(bellmux status)#[default] %H:%M '
+set -g status-right '#{?#(bellmux status --only-pane #{pane_id} --format here),🔔 ,}#[bg=colour208 fg=black]#(bellmux status)#[default] %H:%M '
 "##;
 
 pub const FULLBAR: &str = r##"# --- bellmux status preset: fullbar ---
@@ -25,26 +31,35 @@ pub const FULLBAR: &str = r##"# --- bellmux status preset: fullbar ---
 # (the status bar polls every status-interval seconds via #(...), borders
 # do not). If you want a single coherent "alert" colour, prefer the bar.
 # Requires tmux >= 2.9 for #{?#(...),T,F} conditional in styles.
+#
+# The bar flips orange whenever something is pending. Flipping the WHOLE bar to
+# a third colour for the current pane is jarring, so instead a `here 🔔` badge
+# appears in status-right when the pane you are currently in is the one waiting
+# on you (vs. only other panes pending). The per-pane probe `--only-pane
+# #{pane_id}` prints nothing unless that exact pane is pending.
 set -g status-interval 2
 set -g @bellmux-status-normal 'bg=green fg=black'
 set -g @bellmux-status-notify 'bg=colour208 fg=black'
 set -g status-style '#{?#(bellmux status),#{@bellmux-status-notify},#{@bellmux-status-normal}}'
 
-set -g status-right '#(bellmux status --format="{n}: {latest_message}") | %H:%M '
+set -g status-right '#{?#(bellmux status --only-pane #{pane_id} --format here),here 🔔 ,}#(bellmux status --format="{n}: {latest_message}") | %H:%M '
 "##;
 
 pub const OVERLAY: &str = r##"# --- bellmux status preset: overlay ---
 # Non-destructive: leaves your existing status-style / status-bg untouched.
 # When notifications are pending, an orange block with "{n}: {latest_message}"
-# appears in status-right; otherwise nothing extra is shown.
+# appears in status-right; otherwise nothing extra is shown. A 🔔 badge precedes
+# the block when the pane you are currently in is the one waiting on you (vs.
+# only other panes pending).
 set -g status-interval 2
-set -g status-right '#[#{?#(bellmux status),bg=colour208 fg=black bold,}]#(bellmux status --format=" {n}: {latest_message} ")#[default] %H:%M '
+set -g status-right '#{?#(bellmux status --only-pane #{pane_id} --format here),🔔 ,}#[#{?#(bellmux status),bg=colour208 fg=black bold,}]#(bellmux status --format=" {n}: {latest_message} ")#[default] %H:%M '
 "##;
 
 pub const DOT: &str = r##"# --- bellmux status preset: dot ---
-# Minimal coloured dot.
+# Minimal single glyph: 🔔 when the current pane is the one waiting on you, an
+# orange ● when only other panes are pending, absent when nothing is pending.
 set -g status-interval 2
-set -g status-right '#[fg=colour208,bold]#(bellmux status --format="●") #[default]%H:%M '
+set -g status-right '#[fg=colour208 bold]#{?#(bellmux status --only-pane #{pane_id} --format here),🔔,#(bellmux status --format="●")} #[default]%H:%M '
 "##;
 
 pub const POPUP_SIMPLE: &str = r##"# --- bellmux popup preset: simple ---

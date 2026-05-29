@@ -45,6 +45,11 @@ enum Cmd {
         /// printed when nothing is pending.
         #[arg(long, default_value = "AGENT:{n}")]
         format: String,
+        /// Restrict the snapshot to a single pane. Output is empty unless that
+        /// pane has a pending notification — lets the status bar distinguish
+        /// "the pane I'm in is waiting" from "some other pane is".
+        #[arg(long = "only-pane")]
+        only_pane: Option<String>,
     },
     /// List pending notifications.
     List {
@@ -102,7 +107,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::AckPane { pane_id } => cmd_ack_pane(&pane_id),
         Cmd::AckAll => cmd_ack_all(),
         Cmd::PrunePane { pane_id } => cmd_prune_pane(&pane_id),
-        Cmd::Status { format } => cmd_status(&format),
+        Cmd::Status { format, only_pane } => cmd_status(&format, only_pane.as_deref()),
         Cmd::List { tsv, json } => cmd_list(tsv, json),
         Cmd::Next => cmd_next(),
         Cmd::Prev => cmd_prev(),
@@ -145,9 +150,12 @@ fn cmd_prune_pane(pane_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(template: &str) -> Result<()> {
+fn cmd_status(template: &str, only_pane: Option<&str>) -> Result<()> {
+    if let Some(pane) = only_pane {
+        validate::pane_id(pane)?;
+    }
     let conn = db::open()?;
-    let snap = db::status_snapshot(&conn)?;
+    let snap = db::status_snapshot(&conn, only_pane)?;
     let out = format::render(template, &snap);
     if !out.is_empty() {
         // No trailing newline: tmux #(...) substitution adds whitespace itself.
