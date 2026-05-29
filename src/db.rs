@@ -134,21 +134,44 @@ pub fn clear_cursor(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn status_snapshot(conn: &Connection) -> Result<StatusSnapshot> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT pane_id) FROM notifications",
-        [],
-        |r| r.get(0),
-    )?;
+/// Snapshot of pending notifications.
+///
+/// `only_pane = Some(p)` restricts the snapshot to a single pane: `n` becomes
+/// 0 or 1 and the "latest" fields describe that pane. This is what lets the
+/// status bar answer "is the pane I'm currently in waiting on me?" — combined
+/// with the `n == 0 → empty string` rule in `format::render`, a per-pane probe
+/// prints nothing unless that exact pane is pending.
+pub fn status_snapshot(conn: &Connection, only_pane: Option<&str>) -> Result<StatusSnapshot> {
+    let n: i64 = match only_pane {
+        Some(p) => conn.query_row(
+            "SELECT COUNT(DISTINCT pane_id) FROM notifications WHERE pane_id = ?1",
+            params![p],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT COUNT(DISTINCT pane_id) FROM notifications",
+            [],
+            |r| r.get(0),
+        )?,
+    };
     if n == 0 {
         return Ok(StatusSnapshot::default());
     }
+    let map_latest =
+        |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?));
     let (latest_message, latest_pane, latest_kind): (Option<String>, Option<String>, Option<String>) =
-        conn.query_row(
-            "SELECT message, pane_id, kind FROM notifications ORDER BY id DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        match only_pane {
+            Some(p) => conn.query_row(
+                "SELECT message, pane_id, kind FROM notifications WHERE pane_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![p],
+                map_latest,
+            )?,
+            None => conn.query_row(
+                "SELECT message, pane_id, kind FROM notifications ORDER BY id DESC LIMIT 1",
+                [],
+                map_latest,
+            )?,
+        };
     Ok(StatusSnapshot {
         n: n as usize,
         latest_message,
@@ -288,9 +311,26 @@ mod tests {
         )
         .unwrap();
         insert(&conn, "2026-04-20T10:30:02Z", "%7", "stop", None).unwrap();
-        let snap = status_snapshot(&conn).unwrap();
+        let snap = status_snapshot(&conn, None).unwrap();
         assert_eq!(snap.n, 2);
         assert_eq!(snap.latest_pane.as_deref(), Some("%7"));
+    }
+
+    #[test]
+    fn status_only_pane_filters() {
+        let conn = mem();
+        insert(&conn, "2026-04-20T10:30:00Z", "%5", "stop", None).unwrap();
+        insert(&conn, "2026-04-20T10:30:01Z", "%5", "notification", Some("hi")).unwrap();
+        insert(&conn, "2026-04-20T10:30:02Z", "%7", "stop", None).unwrap();
+        // Pending pane → n==1, latest is that pane's most recent row.
+        let here = status_snapshot(&conn, Some("%5")).unwrap();
+        assert_eq!(here.n, 1);
+        assert_eq!(here.latest_pane.as_deref(), Some("%5"));
+        assert_eq!(here.latest_message.as_deref(), Some("hi"));
+        // Pane with no pending → empty snapshot (drives the empty status string).
+        let absent = status_snapshot(&conn, Some("%99")).unwrap();
+        assert_eq!(absent.n, 0);
+        assert!(absent.latest_pane.is_none());
     }
 
     #[test]
@@ -300,7 +340,7 @@ mod tests {
         insert(&conn, "2026-04-20T10:30:01Z", "%7", "stop", None).unwrap();
         let n = delete_pane(&conn, "%5").unwrap();
         assert_eq!(n, 1);
-        let snap = status_snapshot(&conn).unwrap();
+        let snap = status_snapshot(&conn, None).unwrap();
         assert_eq!(snap.n, 1);
         assert_eq!(snap.latest_pane.as_deref(), Some("%7"));
     }
@@ -308,7 +348,7 @@ mod tests {
     #[test]
     fn empty_status() {
         let conn = mem();
-        let snap = status_snapshot(&conn).unwrap();
+        let snap = status_snapshot(&conn, None).unwrap();
         assert_eq!(snap.n, 0);
         assert!(snap.latest_pane.is_none());
     }
