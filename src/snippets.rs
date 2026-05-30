@@ -88,10 +88,16 @@ pub const KEYBINDS: &str = r##"# --- bellmux keybindings ---
 # is pending (every press revisits it). The keybind uses that tag to show
 # a "cycled through all" message via display-message.
 #
+# `--current #{pane_id}` tells bellmux which pane you are in so it never jumps
+# to the pane you are already sitting in: if another pane is pending it steps
+# past you to that one; if yours is the *only* pending pane it is returned with
+# the ` wrapped` tag (the switch-client below is then a harmless no-op and you
+# still get the "cycled through all" message).
+#
 # Dead panes are pruned by the pane-died hook (see tmux-hook preset), so
 # we don't handle that case explicitly here.
 bind-key a run-shell '
-  read -r pane tag <<<"$(bellmux next)"
+  read -r pane tag <<<"$(bellmux next --current "#{pane_id}")"
   if [ -z "$pane" ]; then
     tmux display-message "No pending notifications"
     exit 0
@@ -104,7 +110,7 @@ bind-key a run-shell '
 
 # Jump to the previous pending notification (opposite direction).
 bind-key b run-shell '
-  read -r pane tag <<<"$(bellmux prev)"
+  read -r pane tag <<<"$(bellmux prev --current "#{pane_id}")"
   if [ -z "$pane" ]; then
     tmux display-message "No pending notifications"
     exit 0

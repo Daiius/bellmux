@@ -225,42 +225,70 @@ pub struct CycleStep {
 /// Advance cursor toward older panes. Empty pending → None.
 /// Null cursor (or cursor pointing to a pane no longer pending) → entry at newest (top).
 /// Valid cursor → (position + 1) % len, wrapping oldest → newest.
-pub fn next_pane(conn: &Connection) -> Result<Option<CycleStep>> {
+///
+/// `current = Some(p)` is the pane the user is sitting in: don't strand them by
+/// returning the pane they're already on. If the computed target is `p` and
+/// another pane is pending, step once more (pane_id is unique per group, so `p`
+/// appears at most once → one extra step always clears it). If `p` is the only
+/// pending pane, return it but flag `wrapped` — there is nowhere else to go,
+/// which is exactly the "you've seen everything" signal.
+pub fn next_pane(conn: &Connection, current: Option<&str>) -> Result<Option<CycleStep>> {
     let panes = ordered_panes(conn)?;
     if panes.is_empty() {
         return Ok(None);
     }
     let cursor = get_cursor(conn)?;
     let len = panes.len();
-    let (new_cursor, wrapped) = match cursor.as_deref().and_then(|c| panes.iter().position(|p| p == c)) {
-        Some(idx) => {
+    let (mut idx, mut wrapped) =
+        match cursor.as_deref().and_then(|c| panes.iter().position(|p| p == c)) {
+            Some(i) => {
+                let new_idx = (i + 1) % len;
+                (new_idx, new_idx == 0)
+            }
+            None => (0, false),
+        };
+    if current == Some(panes[idx].as_str()) {
+        if len > 1 {
             let new_idx = (idx + 1) % len;
-            (panes[new_idx].clone(), new_idx == 0)
+            wrapped |= new_idx == 0;
+            idx = new_idx;
+        } else {
+            wrapped = true;
         }
-        None => (panes[0].clone(), false),
-    };
-    set_cursor(conn, &new_cursor)?;
-    Ok(Some(CycleStep { pane: new_cursor, wrapped }))
+    }
+    set_cursor(conn, &panes[idx])?;
+    Ok(Some(CycleStep { pane: panes[idx].clone(), wrapped }))
 }
 
 /// Retreat cursor toward newer panes. Symmetric to next_pane.
 /// Null/invalid cursor → entry at oldest (bottom).
-pub fn prev_pane(conn: &Connection) -> Result<Option<CycleStep>> {
+/// `current` has the same skip-the-pane-you're-on semantics as next_pane.
+pub fn prev_pane(conn: &Connection, current: Option<&str>) -> Result<Option<CycleStep>> {
     let panes = ordered_panes(conn)?;
     if panes.is_empty() {
         return Ok(None);
     }
     let cursor = get_cursor(conn)?;
     let len = panes.len();
-    let (new_cursor, wrapped) = match cursor.as_deref().and_then(|c| panes.iter().position(|p| p == c)) {
-        Some(idx) => {
+    let (mut idx, mut wrapped) =
+        match cursor.as_deref().and_then(|c| panes.iter().position(|p| p == c)) {
+            Some(i) => {
+                let new_idx = (i + len - 1) % len;
+                (new_idx, new_idx == len - 1)
+            }
+            None => (len - 1, false),
+        };
+    if current == Some(panes[idx].as_str()) {
+        if len > 1 {
             let new_idx = (idx + len - 1) % len;
-            (panes[new_idx].clone(), new_idx == len - 1)
+            wrapped |= new_idx == len - 1;
+            idx = new_idx;
+        } else {
+            wrapped = true;
         }
-        None => (panes[len - 1].clone(), false),
-    };
-    set_cursor(conn, &new_cursor)?;
-    Ok(Some(CycleStep { pane: new_cursor, wrapped }))
+    }
+    set_cursor(conn, &panes[idx])?;
+    Ok(Some(CycleStep { pane: panes[idx].clone(), wrapped }))
 }
 
 /// Render relative-time-ago string ("2m ago", "10s ago").
@@ -393,7 +421,7 @@ mod tests {
         let conn = mem();
         seed(&conn, &["%A", "%B", "%C"]);
         // Order: C, B, A. First next → C (top), not wrapped.
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%C", false)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%C", false)));
         assert_eq!(get_cursor(&conn).unwrap().as_deref(), Some("%C"));
     }
 
@@ -402,7 +430,7 @@ mod tests {
         let conn = mem();
         seed(&conn, &["%A", "%B", "%C"]);
         // Order: C, B, A. First prev → A (bottom), not wrapped.
-        assert_eq!(prev_pane(&conn).unwrap(), Some(step("%A", false)));
+        assert_eq!(prev_pane(&conn, None).unwrap(), Some(step("%A", false)));
         assert_eq!(get_cursor(&conn).unwrap().as_deref(), Some("%A"));
     }
 
@@ -411,11 +439,11 @@ mod tests {
         let conn = mem();
         seed(&conn, &["%A", "%B", "%C"]);
         // Order: C, B, A.
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%C", false)));
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%B", false)));
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%A", false)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%C", false)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%B", false)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%A", false)));
         // wrap
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%C", true)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%C", true)));
     }
 
     #[test]
@@ -423,11 +451,11 @@ mod tests {
         let conn = mem();
         seed(&conn, &["%A", "%B", "%C"]);
         // Order: C, B, A. First prev enters at A, then B, C, wrap to A.
-        assert_eq!(prev_pane(&conn).unwrap(), Some(step("%A", false)));
-        assert_eq!(prev_pane(&conn).unwrap(), Some(step("%B", false)));
-        assert_eq!(prev_pane(&conn).unwrap(), Some(step("%C", false)));
+        assert_eq!(prev_pane(&conn, None).unwrap(), Some(step("%A", false)));
+        assert_eq!(prev_pane(&conn, None).unwrap(), Some(step("%B", false)));
+        assert_eq!(prev_pane(&conn, None).unwrap(), Some(step("%C", false)));
         // wrap
-        assert_eq!(prev_pane(&conn).unwrap(), Some(step("%A", true)));
+        assert_eq!(prev_pane(&conn, None).unwrap(), Some(step("%A", true)));
     }
 
     #[test]
@@ -435,18 +463,18 @@ mod tests {
         let conn = mem();
         seed(&conn, &["%A"]);
         // First next enters at top (not wrap).
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%A", false)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%A", false)));
         // Second next: len=1, new_idx = 0 = entry, prior cursor valid → wrapped.
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%A", true)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%A", true)));
         // Same for prev direction.
-        assert_eq!(prev_pane(&conn).unwrap(), Some(step("%A", true)));
+        assert_eq!(prev_pane(&conn, None).unwrap(), Some(step("%A", true)));
     }
 
     #[test]
     fn empty_pending_returns_none() {
         let conn = mem();
-        assert_eq!(next_pane(&conn).unwrap(), None);
-        assert_eq!(prev_pane(&conn).unwrap(), None);
+        assert_eq!(next_pane(&conn, None).unwrap(), None);
+        assert_eq!(prev_pane(&conn, None).unwrap(), None);
         assert_eq!(get_cursor(&conn).unwrap(), None);
     }
 
@@ -454,7 +482,7 @@ mod tests {
     fn ack_pane_clears_cursor_if_pointing_there() {
         let conn = mem();
         seed(&conn, &["%A", "%B"]);
-        next_pane(&conn).unwrap(); // cursor=%B (top: order B, A)
+        next_pane(&conn, None).unwrap(); // cursor=%B (top: order B, A)
         assert_eq!(get_cursor(&conn).unwrap().as_deref(), Some("%B"));
         delete_pane(&conn, "%B").unwrap();
         assert_eq!(get_cursor(&conn).unwrap(), None);
@@ -464,7 +492,7 @@ mod tests {
     fn ack_other_pane_keeps_cursor() {
         let conn = mem();
         seed(&conn, &["%A", "%B"]);
-        next_pane(&conn).unwrap(); // cursor=%B
+        next_pane(&conn, None).unwrap(); // cursor=%B
         delete_pane(&conn, "%A").unwrap();
         assert_eq!(get_cursor(&conn).unwrap().as_deref(), Some("%B"));
     }
@@ -473,7 +501,7 @@ mod tests {
     fn ack_all_clears_cursor() {
         let conn = mem();
         seed(&conn, &["%A", "%B"]);
-        next_pane(&conn).unwrap();
+        next_pane(&conn, None).unwrap();
         delete_all(&conn).unwrap();
         assert_eq!(get_cursor(&conn).unwrap(), None);
     }
@@ -482,14 +510,14 @@ mod tests {
     fn push_does_not_reset_cursor() {
         let conn = mem();
         seed(&conn, &["%A", "%B"]);
-        next_pane(&conn).unwrap(); // order B, A; cursor=%B
-        next_pane(&conn).unwrap(); // cursor=%A
+        next_pane(&conn, None).unwrap(); // order B, A; cursor=%B
+        next_pane(&conn, None).unwrap(); // cursor=%A
         // New push to %C — cursor must stay on %A.
         insert(&conn, "2026-04-20T10:00:10Z", "%C", "stop", None).unwrap();
         assert_eq!(get_cursor(&conn).unwrap().as_deref(), Some("%A"));
         // Ordering: MIN(id) per pane A=1, B=2, C=10. DESC: C, B, A.
         // next from A wraps to C (top).
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%C", true)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%C", true)));
     }
 
     #[test]
@@ -498,6 +526,55 @@ mod tests {
         seed(&conn, &["%A", "%B"]);
         set_cursor(&conn, "%GHOST").unwrap();
         // Cursor pane not in pending → treat as null → next enters at top (not wrap).
-        assert_eq!(next_pane(&conn).unwrap(), Some(step("%B", false)));
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%B", false)));
+    }
+
+    #[test]
+    fn next_skips_current_pane_on_entry() {
+        let conn = mem();
+        seed(&conn, &["%A", "%B", "%C"]); // order C, B, A
+        // User sits in the newest pending pane C; entry would land on C → skip to B.
+        assert_eq!(next_pane(&conn, Some("%C")).unwrap(), Some(step("%B", false)));
+        assert_eq!(get_cursor(&conn).unwrap().as_deref(), Some("%B"));
+    }
+
+    #[test]
+    fn next_skips_current_pane_mid_cycle_carrying_wrap() {
+        let conn = mem();
+        seed(&conn, &["%A", "%B", "%C"]); // order C, B, A
+        set_cursor(&conn, "%A").unwrap(); // advance from oldest wraps to top C
+        // Wrap target is C but the user is in C → skip to B; wrap flag is kept.
+        assert_eq!(next_pane(&conn, Some("%C")).unwrap(), Some(step("%B", true)));
+    }
+
+    #[test]
+    fn next_current_not_pending_no_skip() {
+        let conn = mem();
+        seed(&conn, &["%A", "%B"]); // order B, A
+        // User is in a pane with no pending notification → normal entry at top.
+        assert_eq!(next_pane(&conn, Some("%Z")).unwrap(), Some(step("%B", false)));
+    }
+
+    #[test]
+    fn next_single_current_pane_reports_wrapped() {
+        let conn = mem();
+        seed(&conn, &["%A"]);
+        // The only pending pane is the one the user is in → return it, flag wrapped.
+        assert_eq!(next_pane(&conn, Some("%A")).unwrap(), Some(step("%A", true)));
+    }
+
+    #[test]
+    fn prev_skips_current_pane_on_entry() {
+        let conn = mem();
+        seed(&conn, &["%A", "%B", "%C"]); // order C, B, A; prev entry = oldest A
+        // User in oldest pending pane A; entry would land on A → skip to B.
+        assert_eq!(prev_pane(&conn, Some("%A")).unwrap(), Some(step("%B", false)));
+    }
+
+    #[test]
+    fn prev_single_current_pane_reports_wrapped() {
+        let conn = mem();
+        seed(&conn, &["%A"]);
+        assert_eq!(prev_pane(&conn, Some("%A")).unwrap(), Some(step("%A", true)));
     }
 }
