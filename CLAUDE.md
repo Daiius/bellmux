@@ -37,8 +37,8 @@ bellmux ack-all                                                  # 全通知を 
 bellmux prune-pane --pane-id <%N>                                # ack-pane と同じ動作、pane-died hook 用の別名
 bellmux status     [--format <tpl>] [--only-pane <%N>]           # 未対応 0 なら常に空文字列。--only-pane でそのペインだけに絞る（pending 無ければ空＝「今いるペインが待ちか」を statusbar で判定可能）
 bellmux list       [--tsv | --json]                              # デフォルトは人間可読
-bellmux next                                                      # サイクル cursor を 1 つ古い方向へ進めて返す。cursor 無ければ最新。一周時は ` wrapped` を付ける
-bellmux prev                                                      # cursor を 1 つ新しい方向へ戻して返す。cursor 無ければ最古
+bellmux next       [--current <%N>]                              # サイクル cursor を 1 つ古い方向へ進めて返す。cursor 無ければ最新。一周時は ` wrapped` を付ける。--current 指定時、移動先が現在ペインなら 1 つ先へスキップ（他に pending があれば）。現在ペインが唯一の pending ならそのまま返し ` wrapped` を付ける
+bellmux prev       [--current <%N>]                              # cursor を 1 つ新しい方向へ戻して返す。cursor 無ければ最古。--current の挙動は next と対称
 bellmux bell                                                      # `who` で取得した自分のログイン tty 全てに BEL (\x07) を書込む
 bellmux init       [--preset <name>]                             # tmux/hook スニペット出力
 ```
@@ -70,6 +70,7 @@ bellmux init       [--preset <name>]                             # tmux/hook ス
 - `push` は cursor に触らない。`ack-pane` / `prune-pane` が cursor のペインを消したときのみ cursor も null に。`ack-all` でも null に。
 - `next` / `prev` 呼出時、cursor が null または現在の pending に居なければ entry（`next`=最新、`prev`=最古）。有効なら 1 つ進めて wrap。
 - 観測的には pending 非空の間 `next` / `prev` は常に有効な pane_id を返す。
+- `--current <%N>`（keybind が `#{pane_id}` を渡す）指定時、cursor 計算結果が現在ペインに一致したら 1 ステップだけ余分に進めて現在ペインへの no-op ジャンプを避ける（pane_id はユニークなのでスキップは高々 1 回）。現在ペインが唯一の pending の場合のみスキップせずそのペインを返し `wrapped=true` にする（行き先が無い＝一周の合図）。`--current` 無し（None）なら従来挙動と完全一致。
 
 ## tmux / Claude 連携
 

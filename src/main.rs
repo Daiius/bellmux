@@ -60,10 +60,21 @@ enum Cmd {
     },
     /// Advance the cycle cursor toward older pending panes and print the new cursor's pane_id.
     /// Entry (no cursor) → newest pane; wraps oldest → newest.
-    Next,
+    Next {
+        /// The pane you are currently in (pass tmux's #{pane_id}). When the
+        /// target would be this same pane, skip to the next pending pane instead
+        /// so the jump is never a no-op. If it is the only pending pane it is
+        /// returned with the ` wrapped` tag.
+        #[arg(long = "current")]
+        current: Option<String>,
+    },
     /// Retreat the cycle cursor toward newer pending panes and print the new cursor's pane_id.
     /// Entry (no cursor) → oldest pane; wraps newest → oldest.
-    Prev,
+    Prev {
+        /// Same skip-the-pane-you're-on behaviour as `next --current`.
+        #[arg(long = "current")]
+        current: Option<String>,
+    },
     /// Write BEL (\x07) to every login tty of the current user (via `who`).
     /// Reaches the outer terminal regardless of tmux session/client topology.
     /// Best-effort: silently skips ttys we cannot open.
@@ -109,8 +120,8 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::PrunePane { pane_id } => cmd_prune_pane(&pane_id),
         Cmd::Status { format, only_pane } => cmd_status(&format, only_pane.as_deref()),
         Cmd::List { tsv, json } => cmd_list(tsv, json),
-        Cmd::Next => cmd_next(),
-        Cmd::Prev => cmd_prev(),
+        Cmd::Next { current } => cmd_next(current.as_deref()),
+        Cmd::Prev { current } => cmd_prev(current.as_deref()),
         Cmd::Bell => cmd_bell(),
         Cmd::Init { preset } => cmd_init(preset.as_deref()),
     }
@@ -177,17 +188,23 @@ fn cmd_list(tsv: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_next() -> Result<()> {
+fn cmd_next(current: Option<&str>) -> Result<()> {
+    if let Some(pane) = current {
+        validate::pane_id(pane)?;
+    }
     let conn = db::open()?;
-    if let Some(step) = db::next_pane(&conn)? {
+    if let Some(step) = db::next_pane(&conn, current)? {
         print_cycle_step(&step);
     }
     Ok(())
 }
 
-fn cmd_prev() -> Result<()> {
+fn cmd_prev(current: Option<&str>) -> Result<()> {
+    if let Some(pane) = current {
+        validate::pane_id(pane)?;
+    }
     let conn = db::open()?;
-    if let Some(step) = db::prev_pane(&conn)? {
+    if let Some(step) = db::prev_pane(&conn, current)? {
         print_cycle_step(&step);
     }
     Ok(())
