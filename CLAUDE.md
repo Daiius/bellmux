@@ -11,7 +11,7 @@ Coding-agent hook, tmux, SQLite の 3 点を結ぶ最小限の通知レイヤ。
 | `src/main.rs` | CLI エントリ（clap derive）。サブコマンドを `cmd_*` にディスパッチ、`push` 用 stdin JSON パース（top-level `message` のみ抽出、表示用）。 |
 | `src/db.rs` | SQLite open (WAL + busy_timeout=3s)、`notifications` / `meta` テーブルの CRUD、cursor accessor、`ordered_panes` / `next_pane` / `prev_pane`、`StatusSnapshot`、`relative_time`、`sanitize_message`、DB パス解決。 |
 | `src/format.rs` | `status --format` のテンプレートエンジン。`{n}` / `{latest_message}` / `{latest_pane}`。`n==0` なら空文字列を返す（tmux 条件式の false 判定に使う）。 |
-| `src/validate.rs` | `pane_id` 検証 (`^%[0-9]+$`)。 |
+| `src/validate.rs` | `pane_id` 検証（不透明キーとして `[A-Za-z0-9%_:./-]`・非空・64 文字以内。tmux `%5` / zellij `terminal_5`・`5` 等を許容、空白・`;`・制御文字は拒否）。 |
 | `src/snippets.rs` | 埋め込みスニペット（`bellmux init` 出力元）。preset: `widget` / `fullbar` / `overlay` / `dot` / `popup-simple` / `popup-enriched` / `keybinds` / `tmux-hook` / `claude-hooks` / `codex-hooks`。 |
 
 ## データフロー
@@ -91,7 +91,7 @@ statusbar の refresh は tmux の status-interval poll に任せる（素朴・
 
 - **Rust バイナリは tmux 非依存**: `pane_id` は不透明な文字列キー、tmux フォーマット記号は出力しない。
 - **glue は全て snippet 埋め込み**: bash スクリプトファイルは配布しない。
-- **入力検証は境界で**: `pane_id` は `^%[0-9]+$`、SQL は常に parameter binding、`message` は tab/CR/LF を空白置換（`sanitize_message`）。
+- **入力検証は境界で**: `pane_id` は不透明キーとして `[A-Za-z0-9%_:./-]`・非空・64 文字以内に限定（multiplexer 非依存。tmux `%5` も zellij `terminal_5`・`5` も通す）、SQL は常に parameter binding、`message` は tab/CR/LF を空白置換（`sanitize_message`）。
 - **未対応 0 なら status 出力は空**: `format::render` は `n==0` で template に関わらず空文字列を返す → tmux 条件式 `#{?#(bellmux status),T,F}` の F 側が選ばれ、statusbar が通常色に戻る。
 
 ## 依存クレート
