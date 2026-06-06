@@ -5,8 +5,12 @@ mod validate;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::io::Read;
+#[cfg(unix)]
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::process::Command;
 
 const ABOUT: &str = "Minimal notification layer bridging coding-agent hooks, tmux, and SQLite.";
@@ -226,6 +230,7 @@ fn cmd_bell() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn ring_bell() {
     for tty in user_login_ttys() {
         if let Ok(mut f) = OpenOptions::new().write(true).open(&tty) {
@@ -234,9 +239,17 @@ fn ring_bell() {
     }
 }
 
+/// Off Unix there is no portable way to reach every login terminal the way
+/// `who` + `/dev/tty` does, so `bell` is intentionally a no-op. The subcommand
+/// stays on every platform so the shared `push && bell` snippets keep working;
+/// on Windows the chain simply rings nothing.
+#[cfg(not(unix))]
+fn ring_bell() {}
+
 /// Enumerate `/dev/<tty>` paths from `who` for the current `$USER`, deduped.
 /// `who` is POSIX and reads the same utmpx DB libc::getutxent would; shelling
 /// out keeps the binary free of FFI for a one-off best-effort path.
+#[cfg(unix)]
 fn user_login_ttys() -> Vec<String> {
     let user = match std::env::var("USER") {
         Ok(u) if !u.is_empty() => u,
