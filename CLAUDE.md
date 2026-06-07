@@ -91,7 +91,7 @@ statusbar の refresh は tmux の status-interval poll に任せる（素朴・
 
 - **Rust バイナリは tmux 非依存**: `pane_id` は不透明な文字列キー、tmux フォーマット記号は出力しない。
 - **glue は全て snippet 埋め込み**: bash スクリプトファイルは配布しない。
-- **入力検証は境界で**: `pane_id` は不透明キーとして `[A-Za-z0-9%_:./-]`・非空・64 文字以内に限定（multiplexer 非依存。tmux `%5` も zellij `terminal_5`・`5` も通す）、SQL は常に parameter binding、`message` は tab/CR/LF を空白置換（`sanitize_message`）。
+- **入力検証は境界で**: `pane_id` は不透明キーとして `[A-Za-z0-9%_:./-]`・非空・64 文字以内に限定（multiplexer 非依存。tmux `%5` も zellij `terminal_5`・`5` も通す）、SQL は常に parameter binding、`message` は全制御文字（tab/CR/LF に加え ESC/BEL 等）を空白置換し、tmux status bar / `list` 出力へのターミナルエスケープシーケンス注入を防ぐ（`sanitize_message`）。
 - **未対応 0 なら status 出力は空**: `format::render` は `n==0` で template に関わらず空文字列を返す → tmux 条件式 `#{?#(bellmux status),T,F}` の F 側が選ばれ、statusbar が通常色に戻る。
 
 ## 依存クレート

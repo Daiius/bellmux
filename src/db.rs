@@ -51,13 +51,13 @@ pub fn now_iso8601() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// Replace tab/CR/LF with a single space so TSV output and column layout stay sane.
+/// Replace any control character (tab/CR/LF as well as ESC/BEL/other C0/C1 and
+/// DEL) with a single space so TSV output and column layout stay sane and the
+/// message cannot smuggle terminal escape sequences into the tmux status bar or
+/// `list` output.
 pub fn sanitize_message(s: &str) -> String {
     s.chars()
-        .map(|c| match c {
-            '\t' | '\r' | '\n' => ' ',
-            other => other,
-        })
+        .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
 
@@ -385,6 +385,16 @@ mod tests {
     fn sanitize_strips_separators() {
         assert_eq!(sanitize_message("a\tb\nc\rd"), "a b c d");
         assert_eq!(sanitize_message("plain"), "plain");
+    }
+
+    #[test]
+    fn sanitize_strips_terminal_escapes() {
+        // ESC-based CSI/OSC sequences and BEL must not survive into terminal output.
+        assert_eq!(sanitize_message("\u{1b}[31mred\u{1b}[0m"), " [31mred [0m");
+        assert_eq!(sanitize_message("a\u{7}b"), "a b");
+        assert_eq!(sanitize_message("\u{1b}]0;title\u{7}"), " ]0;title ");
+        // Non-control unicode is preserved.
+        assert_eq!(sanitize_message("🔔 ok"), "🔔 ok");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "bellmux"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Minimal notification layer bridging Claude Code hooks, tmux, and SQLite."
 license = "MIT OR Apache-2.0"
