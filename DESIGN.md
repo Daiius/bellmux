@@ -114,7 +114,7 @@ Permission dialog の応答に直接対応するフックは **Claude Code が�
 - **SQL injection**: parameter binding 必須
 - **pane_id injection**: `^%[0-9]+$` で検証（`validate::pane_id`）
 - **JSON injection**: `serde_json::Value` で安全に parse、`message` field のみ抽出
-- **TSV / 表示層 injection**: `sanitize_message` で tab / CR / LF を空白置換
+- **TSV / 表示層 injection**: `sanitize_message` で全制御文字（tab / CR / LF に加え ESC / BEL 等）を空白置換し、status bar / `list` へのターミナルエスケープシーケンス注入を防ぐ
 
 ### 禁止
 
