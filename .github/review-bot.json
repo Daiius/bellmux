@@ -1,0 +1,7 @@
+{
+  "prd": {
+    "type": "in-repo",
+    "paths": ["DESIGN.md", "CLAUDE.md", "README.md"]
+  },
+  "schedulerMode": "manual"
+}
