@@ -37,8 +37,12 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
     # pane is pending — we surface that via display-message.
     # Dead panes are pruned by the pane-died hook (tmux-hook preset), so no
     # explicit fallback needed here.
+    # POSIX sh: tmux runs `run-shell` with /bin/sh (dash on Debian/Ubuntu),
+    # where a bash here-string would be a syntax error.
     bind-key a run-shell '
-      read -r pane tag <<<"$(bellmux next)"
+      set -- $(bellmux next)
+      pane=$1
+      tag=$2
       if [ -z "$pane" ]; then
         tmux display-message "No pending notifications"
         exit 0
@@ -66,15 +70,16 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
       "hooks": {
         "Notification": [{
           "matcher": "permission_prompt|elicitation_dialog",
-          "hooks": [{"type": "command", "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"}]
         }],
         "Stop": [{
           "matcher": "",
-          "hooks": [{"type": "command", "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"}]
         }]
       }
     }
     ```
+    Every command starts with `[ -n "$TMUX_PANE" ] || exit 0;` so a session started *outside* tmux skips the hook silently instead of failing on an empty pane id. Running outside tmux is usually deliberate — it should not print an error on every turn.
   - Or append it to any long-running command in a tmux pane (`$TMUX_PANE` is set automatically by tmux) so completion fires a notification + bell:
     ```sh
     make build; bellmux push --kind stop --pane-id "$TMUX_PANE" && bellmux bell
@@ -88,11 +93,11 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
       "hooks": {
         "UserPromptSubmit": [{
           "matcher": "",
-          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
         }],
         "PostToolUse": [{
           "matcher": "",
-          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
         }]
       }
     }
@@ -259,8 +264,12 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
     # pane is pending — we surface that via display-message.
     # Dead panes are pruned by the pane-died hook (tmux-hook preset), so no
     # explicit fallback needed here.
+    # POSIX sh: tmux runs `run-shell` with /bin/sh (dash on Debian/Ubuntu),
+    # where a bash here-string would be a syntax error.
     bind-key a run-shell '
-      read -r pane tag <<<"$(bellmux next)"
+      set -- $(bellmux next)
+      pane=$1
+      tag=$2
       if [ -z "$pane" ]; then
         tmux display-message "No pending notifications"
         exit 0
@@ -288,15 +297,16 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
       "hooks": {
         "Notification": [{
           "matcher": "permission_prompt|elicitation_dialog",
-          "hooks": [{"type": "command", "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"}]
         }],
         "Stop": [{
           "matcher": "",
-          "hooks": [{"type": "command", "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"}]
         }]
       }
     }
     ```
+    各コマンド先頭の `[ -n "$TMUX_PANE" ] || exit 0;` は、tmux の *外* で起動したセッションで hook を静かにスキップするためのガードです（空の pane_id でエラーにならない）。tmux 外での実行は意図的なことが多く、ターンごとにエラーが出るのは煩わしいためです。
   - 任意の長時間コマンドに連結すれば、完了時に通知 + bell を飛ばせます（`$TMUX_PANE` は tmux が自動で入れる環境変数）：
     ```sh
     make build; bellmux push --kind stop --pane-id "$TMUX_PANE" && bellmux bell
@@ -310,11 +320,11 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
       "hooks": {
         "UserPromptSubmit": [{
           "matcher": "",
-          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
         }],
         "PostToolUse": [{
           "matcher": "",
-          "hooks": [{"type": "command", "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
+          "hooks": [{"type": "command", "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""}]
         }]
       }
     }
