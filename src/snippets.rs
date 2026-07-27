@@ -96,8 +96,17 @@ pub const KEYBINDS: &str = r##"# --- bellmux keybindings ---
 #
 # Dead panes are pruned by the pane-died hook (see tmux-hook preset), so
 # we don't handle that case explicitly here.
+#
+# The body is POSIX sh, not bash: tmux runs `run-shell` commands with /bin/sh,
+# which is dash on Debian/Ubuntu. A bash here-string (`read -r pane tag <<<"$(...)"`)
+# is a syntax error there and the binding fails with `returned 2` — it only
+# appears to work on macOS, where /bin/sh is bash. `set --` splits the output
+# portably; pane_id and the ` wrapped` tag contain no whitespace or glob
+# characters (bellmux validates pane_id), so the unquoted substitution is safe.
 bind-key a run-shell '
-  read -r pane tag <<<"$(bellmux next --current "#{pane_id}")"
+  set -- $(bellmux next --current "#{pane_id}")
+  pane=$1
+  tag=$2
   if [ -z "$pane" ]; then
     tmux display-message "No pending notifications"
     exit 0
@@ -110,7 +119,9 @@ bind-key a run-shell '
 
 # Jump to the previous pending notification (opposite direction).
 bind-key b run-shell '
-  read -r pane tag <<<"$(bellmux prev --current "#{pane_id}")"
+  set -- $(bellmux prev --current "#{pane_id}")
+  pane=$1
+  tag=$2
   if [ -z "$pane" ]; then
     tmux display-message "No pending notifications"
     exit 0
@@ -137,6 +148,15 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 # Add these to ~/.claude/settings.json. If the file already has a "hooks"
 # section, merge — do NOT overwrite. The $TMUX_PANE env var is set by tmux
 # automatically and inherited by the Claude Code hook subprocess.
+#
+# Running outside tmux:
+#   Every command starts with `[ -n "$TMUX_PANE" ] || exit 0;` so that a Claude
+#   Code session started outside tmux exits the hook silently instead of failing
+#   `bellmux: invalid pane_id ... got ""`. Running outside tmux is a normal,
+#   deliberate thing to do; it should not print an error on every turn. The
+#   guard lives here rather than in bellmux itself: bellmux validates pane_id at
+#   its boundary (a genuinely empty --pane-id stays an error), and deciding
+#   "there is no pane to notify about" is the glue's job.
 #
 # Customising the alert sound:
 #   `bellmux push ... && bellmux bell` records the notification, then rings BEL
@@ -174,42 +194,42 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
       "matcher": "permission_prompt|elicitation_dialog",
       "hooks": [{
         "type": "command",
-        "command": "bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell"
       }]
     }],
     "Stop": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell"
       }]
     }],
     "UserPromptSubmit": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""
       }]
     }],
     "PostToolUse": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""
       }]
     }],
     "PostToolUseFailure": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""
       }]
     }],
     "SessionEnd": [{
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\""
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""
       }]
     }]
   }
@@ -223,6 +243,12 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
 # pipe a small fixed JSON object into bellmux instead, so Codex prompts and
 # hook payloads are not stored in bellmux. $TMUX_PANE is inherited by hook
 # subprocesses when Codex runs inside tmux.
+#
+# Running outside tmux:
+#   Every command starts with `[ -n "$TMUX_PANE" ] || exit 0;` so a Codex
+#   session started outside tmux exits the hook silently instead of failing on
+#   an empty --pane-id. See the claude-hooks preset for why the guard lives in
+#   the snippet rather than in bellmux.
 #
 # Codex hook trust:
 #   Non-managed command hooks must be reviewed and trusted before they run.
@@ -247,7 +273,7 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "printf '%s' '{\"message\":\"Codex needs approval\"}' | bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; printf '%s' '{\"message\":\"Codex needs approval\"}' | bellmux push --kind notification --pane-id \"$TMUX_PANE\" && bellmux bell",
         "statusMessage": "Recording bellmux approval notification"
       }]
     }],
@@ -255,14 +281,14 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "printf '%s' '{\"message\":\"Codex turn complete\"}' | bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; printf '%s' '{\"message\":\"Codex turn complete\"}' | bellmux push --kind stop --pane-id \"$TMUX_PANE\" && bellmux bell",
         "statusMessage": "Recording bellmux turn notification"
       }]
     }],
     "UserPromptSubmit": [{
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
         "statusMessage": "Clearing bellmux notification"
       }]
     }],
@@ -270,7 +296,7 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
         "statusMessage": "Clearing bellmux tool notification"
       }]
     }],
@@ -278,7 +304,7 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
       "matcher": "startup|resume|clear",
       "hooks": [{
         "type": "command",
-        "command": "bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
         "statusMessage": "Clearing stale bellmux notification"
       }]
     }]
