@@ -16,9 +16,19 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS holds (
+  pane_id    TEXT PRIMARY KEY,
+  expires_at TEXT NOT NULL
+);
 "#;
 
 const META_CURSOR: &str = "cursor";
+
+/// SQL predicate: "pane `n.pane_id` is NOT currently held". Takes one bound
+/// parameter, the current time as RFC3339 UTC (same format as `expires_at`, so
+/// plain string comparison is chronological).
+const NOT_HELD: &str =
+    "NOT EXISTS (SELECT 1 FROM holds h WHERE h.pane_id = n.pane_id AND h.expires_at > ?)";
 
 pub fn db_path() -> Result<PathBuf> {
     if let Ok(custom) = std::env::var("BELLMUX_DB_PATH") {
@@ -68,6 +78,10 @@ pub struct Notification {
     pub pane_id: String,
     pub kind: String,
     pub message: Option<String>,
+    /// The pane is under an unexpired hold, so `status` is not advertising it.
+    /// `list` still shows the row — a held notification must be findable, or a
+    /// silent status bar and a non-empty queue cannot be told apart.
+    pub held: bool,
 }
 
 #[derive(Debug, Default)]
@@ -92,11 +106,18 @@ pub fn insert(
     Ok(conn.last_insert_rowid())
 }
 
+/// Ack a pane. This also releases any hold on it: an ack means either the user
+/// intervened here or the pane started doing real work again, and in both cases
+/// "self-driving, don't advertise me" no longer holds. It is what keeps a hold
+/// from outliving the wait that justified it — the hook that acks on
+/// PostToolUse re-places the hold only when the tool it just ran started more
+/// background work.
 pub fn delete_pane(conn: &Connection, pane_id: &str) -> Result<usize> {
     let n = conn.execute(
         "DELETE FROM notifications WHERE pane_id = ?1",
         params![pane_id],
     )?;
+    clear_hold(conn, pane_id)?;
     if get_cursor(conn)?.as_deref() == Some(pane_id) {
         clear_cursor(conn)?;
     }
@@ -105,6 +126,7 @@ pub fn delete_pane(conn: &Connection, pane_id: &str) -> Result<usize> {
 
 pub fn delete_all(conn: &Connection) -> Result<usize> {
     let n = conn.execute("DELETE FROM notifications", [])?;
+    clear_all_holds(conn)?;
     clear_cursor(conn)?;
     Ok(n)
 }
@@ -134,44 +156,87 @@ pub fn clear_cursor(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Snapshot of pending notifications.
+/// RFC3339 UTC timestamp `secs` seconds from now — the expiry of a hold lease.
+pub fn expiry_iso8601(secs: i64) -> String {
+    (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Place (or refresh) a hold on a pane until `expires_at`.
+///
+/// A hold means "this pane is self-driving": it is waiting on machinery it
+/// started itself (a backgrounded command, a spawned agent), not on the user.
+/// Holds are a *read-time* filter — `push` still records every notification it
+/// is handed, the hold only stops that pane from being advertised. When the
+/// lease expires the suppressed notification reappears, so the failure mode of
+/// a leaked hold is a late notification, never a lost one.
+pub fn set_hold(conn: &Connection, pane_id: &str, expires_at: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO holds (pane_id, expires_at) VALUES (?1, ?2)
+         ON CONFLICT(pane_id) DO UPDATE SET expires_at = excluded.expires_at",
+        params![pane_id, expires_at],
+    )?;
+    prune_expired_holds(conn)?;
+    Ok(())
+}
+
+pub fn clear_hold(conn: &Connection, pane_id: &str) -> Result<usize> {
+    let n = conn.execute("DELETE FROM holds WHERE pane_id = ?1", params![pane_id])?;
+    Ok(n)
+}
+
+pub fn clear_all_holds(conn: &Connection) -> Result<usize> {
+    let n = conn.execute("DELETE FROM holds", [])?;
+    Ok(n)
+}
+
+/// Drop lapsed leases. Correctness never depends on this (every read compares
+/// `expires_at` against now); it just keeps the table from accumulating rows
+/// for panes that are never held again. Called from the write path only, so
+/// the 2-second status poll stays read-only.
+fn prune_expired_holds(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM holds WHERE expires_at <= ?1",
+        params![now_iso8601()],
+    )?;
+    Ok(n)
+}
+
+/// Snapshot of pending notifications, excluding panes that are currently held.
 ///
 /// `only_pane = Some(p)` restricts the snapshot to a single pane: `n` becomes
 /// 0 or 1 and the "latest" fields describe that pane. This is what lets the
 /// status bar answer "is the pane I'm currently in waiting on me?" — combined
 /// with the `n == 0 → empty string` rule in `format::render`, a per-pane probe
 /// prints nothing unless that exact pane is pending.
+///
+/// Held panes are filtered out here rather than at `push` time so the record
+/// survives the hold; see `set_hold`.
 pub fn status_snapshot(conn: &Connection, only_pane: Option<&str>) -> Result<StatusSnapshot> {
-    let n: i64 = match only_pane {
-        Some(p) => conn.query_row(
-            "SELECT COUNT(DISTINCT pane_id) FROM notifications WHERE pane_id = ?1",
-            params![p],
-            |r| r.get(0),
-        )?,
-        None => conn.query_row(
-            "SELECT COUNT(DISTINCT pane_id) FROM notifications",
-            [],
-            |r| r.get(0),
-        )?,
+    let mut binds: Vec<String> = vec![now_iso8601()];
+    let pane_clause = match only_pane {
+        Some(p) => {
+            binds.push(p.to_string());
+            " AND n.pane_id = ?"
+        }
+        None => "",
     };
+    let n: i64 = conn.query_row(
+        &format!("SELECT COUNT(DISTINCT n.pane_id) FROM notifications n WHERE {NOT_HELD}{pane_clause}"),
+        rusqlite::params_from_iter(binds.iter()),
+        |r| r.get(0),
+    )?;
     if n == 0 {
         return Ok(StatusSnapshot::default());
     }
-    let map_latest =
-        |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?));
     let (latest_message, latest_pane, latest_kind): (Option<String>, Option<String>, Option<String>) =
-        match only_pane {
-            Some(p) => conn.query_row(
-                "SELECT message, pane_id, kind FROM notifications WHERE pane_id = ?1 ORDER BY id DESC LIMIT 1",
-                params![p],
-                map_latest,
-            )?,
-            None => conn.query_row(
-                "SELECT message, pane_id, kind FROM notifications ORDER BY id DESC LIMIT 1",
-                [],
-                map_latest,
-            )?,
-        };
+        conn.query_row(
+            &format!(
+                "SELECT n.message, n.pane_id, n.kind FROM notifications n
+                 WHERE {NOT_HELD}{pane_clause} ORDER BY n.id DESC LIMIT 1"
+            ),
+            rusqlite::params_from_iter(binds.iter()),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
     Ok(StatusSnapshot {
         n: n as usize,
         latest_message,
@@ -180,33 +245,44 @@ pub fn status_snapshot(conn: &Connection, only_pane: Option<&str>) -> Result<Sta
     })
 }
 
+/// Every pending notification, held or not. Unlike `status_snapshot` this does
+/// not filter — `list` is the "show me everything" view — but each row carries
+/// the pane's hold state so the caller can mark it.
 pub fn list_all(conn: &Connection) -> Result<Vec<Notification>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, created_at, pane_id, kind, message FROM notifications ORDER BY created_at ASC, id ASC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT n.id, n.created_at, n.pane_id, n.kind, n.message, NOT ({NOT_HELD})
+         FROM notifications n ORDER BY n.created_at ASC, n.id ASC"
+    ))?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(params![now_iso8601()], |r| {
             Ok(Notification {
                 id: r.get(0)?,
                 created_at: r.get(1)?,
                 pane_id: r.get(2)?,
                 kind: r.get(3)?,
                 message: r.get(4)?,
+                held: r.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-/// Panes ordered newest-first by MIN(id) per pane.
+/// Panes ordered newest-first by MIN(id) per pane, excluding held panes.
 /// "Newest" = most-recently-entered-the-queue. Re-notifications on an existing
 /// pane do NOT promote it; its position is pinned to its first notification.
+///
+/// Held panes are dropped so `next` / `prev` never strand the user in a pane
+/// that the status bar is not even advertising. A cursor left pointing at a
+/// pane that has since been held is simply not found in this list, which the
+/// existing stale-cursor path already treats as "re-enter at the top".
 pub fn ordered_panes(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT pane_id FROM notifications GROUP BY pane_id ORDER BY MIN(id) DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT n.pane_id FROM notifications n WHERE {NOT_HELD}
+         GROUP BY n.pane_id ORDER BY MIN(n.id) DESC"
+    ))?;
     let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
+        .query_map(params![now_iso8601()], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -395,6 +471,110 @@ mod tests {
         assert_eq!(sanitize_message("\u{1b}]0;title\u{7}"), " ]0;title ");
         // Non-control unicode is preserved.
         assert_eq!(sanitize_message("🔔 ok"), "🔔 ok");
+    }
+
+    const FUTURE: &str = "2099-01-01T00:00:00Z";
+    const PAST: &str = "2000-01-01T00:00:00Z";
+
+    #[test]
+    fn hold_hides_pane_from_status_but_keeps_the_row() {
+        let conn = mem();
+        insert(&conn, "2026-04-20T10:30:00Z", "%5", "stop", None).unwrap();
+        insert(&conn, "2026-04-20T10:30:01Z", "%7", "stop", None).unwrap();
+        set_hold(&conn, "%5", FUTURE).unwrap();
+        // Global status counts only the unheld pane...
+        let snap = status_snapshot(&conn, None).unwrap();
+        assert_eq!(snap.n, 1);
+        assert_eq!(snap.latest_pane.as_deref(), Some("%7"));
+        // ...the per-pane probe for the held pane goes empty (drives the "is the
+        // pane I'm in waiting on me?" badge back off)...
+        assert_eq!(status_snapshot(&conn, Some("%5")).unwrap().n, 0);
+        // ...but the notification itself is still recorded.
+        let rows = list_all(&conn).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().find(|r| r.pane_id == "%5").unwrap().held);
+        assert!(!rows.iter().find(|r| r.pane_id == "%7").unwrap().held);
+    }
+
+    #[test]
+    fn lapsed_hold_lets_the_notification_resurface() {
+        let conn = mem();
+        insert(&conn, "2026-04-20T10:30:00Z", "%5", "stop", None).unwrap();
+        // Insert directly: set_hold prunes anything already expired.
+        conn.execute(
+            "INSERT INTO holds (pane_id, expires_at) VALUES (?1, ?2)",
+            params!["%5", PAST],
+        )
+        .unwrap();
+        // A leaked hold must fail toward a late notification, never a lost one.
+        assert_eq!(status_snapshot(&conn, None).unwrap().n, 1);
+        assert!(!list_all(&conn).unwrap()[0].held);
+    }
+
+    #[test]
+    fn set_hold_refreshes_the_lease() {
+        let conn = mem();
+        insert(&conn, "2026-04-20T10:30:00Z", "%5", "stop", None).unwrap();
+        set_hold(&conn, "%5", "2030-01-01T00:00:00Z").unwrap();
+        set_hold(&conn, "%5", FUTURE).unwrap();
+        let expires: String = conn
+            .query_row("SELECT expires_at FROM holds WHERE pane_id = '%5'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(expires, FUTURE);
+    }
+
+    #[test]
+    fn held_panes_drop_out_of_the_cycle() {
+        let conn = mem();
+        seed(&conn, &["%A", "%B", "%C"]); // order C, B, A
+        set_hold(&conn, "%C", FUTURE).unwrap();
+        assert_eq!(ordered_panes(&conn).unwrap(), vec!["%B", "%A"]);
+        assert_eq!(next_pane(&conn, None).unwrap(), Some(step("%B", false)));
+    }
+
+    #[test]
+    fn cycle_reports_empty_when_every_pending_pane_is_held() {
+        let conn = mem();
+        seed(&conn, &["%A"]);
+        set_hold(&conn, "%A", FUTURE).unwrap();
+        assert_eq!(next_pane(&conn, None).unwrap(), None);
+        assert_eq!(prev_pane(&conn, None).unwrap(), None);
+    }
+
+    #[test]
+    fn ack_pane_releases_the_hold() {
+        let conn = mem();
+        insert(&conn, "2026-04-20T10:30:00Z", "%5", "stop", None).unwrap();
+        set_hold(&conn, "%5", FUTURE).unwrap();
+        delete_pane(&conn, "%5").unwrap();
+        assert_eq!(clear_hold(&conn, "%5").unwrap(), 0, "hold should already be gone");
+        // A notification pushed after the ack is advertised again immediately.
+        insert(&conn, "2026-04-20T10:31:00Z", "%5", "stop", None).unwrap();
+        assert_eq!(status_snapshot(&conn, None).unwrap().n, 1);
+    }
+
+    #[test]
+    fn ack_all_releases_every_hold() {
+        let conn = mem();
+        seed(&conn, &["%A", "%B"]);
+        set_hold(&conn, "%A", FUTURE).unwrap();
+        set_hold(&conn, "%B", FUTURE).unwrap();
+        delete_all(&conn).unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM holds", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn hold_without_pending_notifications_is_harmless() {
+        let conn = mem();
+        set_hold(&conn, "%Z", FUTURE).unwrap();
+        assert_eq!(status_snapshot(&conn, None).unwrap().n, 0);
+        // The hold still applies to a notification that arrives later — this is
+        // the ordering the Stop hook relies on (hold placed before the Stop).
+        insert(&conn, "2026-04-20T10:30:00Z", "%Z", "stop", None).unwrap();
+        assert_eq!(status_snapshot(&conn, None).unwrap().n, 0);
     }
 
     #[test]
