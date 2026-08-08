@@ -214,11 +214,21 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 #   still running, so it does not distinguish the two cases.
 #
 #   jq is optional. Without it the hold step is skipped and behaviour is
-#   exactly what it was before holds existed. Only Bash's explicit
-#   `run_in_background: true` is matched, because that is the case whose
-#   PostToolUse-fires-at-launch timing has been verified; other background-
-#   spawning tools may instead fire PostToolUse at completion, where a hold
-#   would suppress the notification you actually want.
+#   exactly what it was before holds existed. The match is on `tool_name ==
+#   "Bash"` AND `tool_input.run_in_background == true`: the tool name is part
+#   of the condition, not just documentation, because other tools carry a
+#   `run_in_background` input of their own and may fire PostToolUse at
+#   completion rather than at launch — holding there would suppress the very
+#   notification worth seeing. Bash is the case whose fires-at-launch timing
+#   has been verified.
+#
+#   `ack-pane` failing is fatal for the hook: if the ack did not happen, a
+#   stale notification is still queued, and placing a hold on top of it would
+#   suppress that stale notification under a fresh lease. So the ack failure
+#   is propagated with `|| exit $?` and the hold is only attempted after it
+#   succeeds. The trailing `exit 0` exists solely so that "jq missing" and
+#   "not a backgrounded Bash" — both normal outcomes — do not leave the
+#   script exiting on the last failed test.
 {
   "hooks": {
     "Notification": [{
@@ -246,7 +256,7 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; payload=$(cat); bellmux ack-pane --pane-id \"$TMUX_PANE\"; command -v jq >/dev/null 2>&1 && printf '%s' \"$payload\" | jq -e '.tool_input.run_in_background == true' >/dev/null 2>&1 && bellmux hold --pane-id \"$TMUX_PANE\"; exit 0"
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; payload=$(cat); bellmux ack-pane --pane-id \"$TMUX_PANE\" || exit $?; if command -v jq >/dev/null 2>&1 && printf '%s' \"$payload\" | jq -e '.tool_name == \"Bash\" and .tool_input.run_in_background == true' >/dev/null 2>&1; then bellmux hold --pane-id \"$TMUX_PANE\" || exit $?; fi; exit 0"
       }]
     }],
     "PostToolUseFailure": [{
@@ -382,5 +392,109 @@ pub fn by_name(name: &str) -> Option<&'static str> {
         "claude-hooks" => Some(CLAUDE_HOOKS),
         "codex-hooks" => Some(CODEX_HOOKS),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hook presets are a `#`-commented header followed by the JSON object
+    /// the user pastes into their agent config. Strip the header and parse the
+    /// rest — the commands inside are hand-escaped inside a Rust raw string,
+    /// which is exactly the kind of thing that silently rots.
+    fn json_body(preset: &str) -> serde_json::Value {
+        let body: String = preset
+            .lines()
+            .skip_while(|l| l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&body).expect("preset body must be valid JSON")
+    }
+
+    fn command(preset: &str, event: &str) -> String {
+        json_body(preset)["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{event} hook has no command string"))
+            .to_string()
+    }
+
+    #[test]
+    fn hook_presets_are_valid_json() {
+        json_body(CLAUDE_HOOKS);
+        json_body(CODEX_HOOKS);
+    }
+
+    #[test]
+    fn every_preset_is_reachable_by_name() {
+        for name in [
+            "widget",
+            "fullbar",
+            "overlay",
+            "dot",
+            "popup-simple",
+            "popup-enriched",
+            "keybinds",
+            "tmux-hook",
+            "claude-hooks",
+            "codex-hooks",
+        ] {
+            assert!(by_name(name).is_some(), "{name} is not reachable");
+        }
+        assert!(by_name("nope").is_none());
+    }
+
+    /// The hold must be gated on the tool name as well as the flag. Other tools
+    /// carry a `run_in_background` input of their own and may fire PostToolUse
+    /// at completion rather than at launch, where a hold suppresses exactly the
+    /// notification the user wants.
+    #[test]
+    fn post_tool_use_holds_only_backgrounded_bash() {
+        let cmd = command(CLAUDE_HOOKS, "PostToolUse");
+        assert!(
+            cmd.contains(r#".tool_name == "Bash""#),
+            "hold condition must check the tool name: {cmd}"
+        );
+        assert!(
+            cmd.contains(".tool_input.run_in_background == true"),
+            "hold condition must check run_in_background: {cmd}"
+        );
+    }
+
+    /// A failed ack means a stale notification is still queued; holding on top
+    /// of it would suppress that stale notification under a fresh lease. The
+    /// hook must fail instead of reporting success.
+    #[test]
+    fn post_tool_use_propagates_ack_failure() {
+        let cmd = command(CLAUDE_HOOKS, "PostToolUse");
+        let ack = cmd
+            .find("ack-pane")
+            .expect("PostToolUse must still ack the pane");
+        let hold = cmd.find("bellmux hold").expect("PostToolUse must place holds");
+        assert!(ack < hold, "ack must run before the hold: {cmd}");
+        assert!(
+            cmd[ack..hold].contains("|| exit $?"),
+            "ack failure must abort before the hold is placed: {cmd}"
+        );
+    }
+
+    /// Every hook command has to survive being run outside tmux, where
+    /// `$TMUX_PANE` is unset and there is no pane to notify about.
+    #[test]
+    fn every_hook_command_guards_on_tmux_pane() {
+        for preset in [CLAUDE_HOOKS, CODEX_HOOKS] {
+            let hooks = json_body(preset)["hooks"].clone();
+            for (event, entries) in hooks.as_object().expect("hooks must be an object") {
+                for entry in entries.as_array().expect("event must hold an array") {
+                    for hook in entry["hooks"].as_array().expect("entry needs hooks") {
+                        let cmd = hook["command"].as_str().expect("hook needs a command");
+                        assert!(
+                            cmd.starts_with(r#"[ -n "$TMUX_PANE" ] || exit 0;"#),
+                            "{event} command is missing the outside-tmux guard: {cmd}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
