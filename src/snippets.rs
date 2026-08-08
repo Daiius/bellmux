@@ -188,6 +188,37 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
 #     while the tmux pane lives on). Clear pending so a stale notification does
 #     not ghost until the pane itself dies (the pane-died tmux hook only fires
 #     when the pane actually closes).
+#
+# Hold policy (self-driving panes):
+#   Stop means "the turn ended", which is not the same as "the user is needed".
+#   When Claude launches a backgrounded command and ends its turn to wait for
+#   it, Stop fires and the pane is advertised as waiting on you for the whole
+#   wait — then the task completes, Claude resumes, launches the next wait, and
+#   does it again. Measured order for one such cycle:
+#
+#     PostToolUse  tool=Bash run_in_background=true   <- fires at launch
+#     Stop                                            <- the false notification
+#     Notification notification_type=idle_prompt      <- 60s later, also false
+#     UserPromptSubmit                                <- the auto-resume
+#
+#   So the launch is observable one event before the Stop: the PostToolUse hook
+#   below places a hold when the tool it just ran started background work.
+#   `bellmux hold` stops `status` and `next`/`prev` from advertising the pane
+#   while the lease is alive; the notification is still recorded, and it
+#   resurfaces if the lease expires. The hold is released by the next
+#   `ack-pane` — including the one in this very hook, which runs first — so a
+#   turn that does real work and then stops normally notifies as before.
+#
+#   `idle_prompt` is deliberately NOT used as the "user is really needed"
+#   signal: it fires 60s after any Stop, including one with a background task
+#   still running, so it does not distinguish the two cases.
+#
+#   jq is optional. Without it the hold step is skipped and behaviour is
+#   exactly what it was before holds existed. Only Bash's explicit
+#   `run_in_background: true` is matched, because that is the case whose
+#   PostToolUse-fires-at-launch timing has been verified; other background-
+#   spawning tools may instead fire PostToolUse at completion, where a hold
+#   would suppress the notification you actually want.
 {
   "hooks": {
     "Notification": [{
@@ -215,7 +246,7 @@ pub const CLAUDE_HOOKS: &str = r##"# --- bellmux Claude Code hooks ---
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\""
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; payload=$(cat); bellmux ack-pane --pane-id \"$TMUX_PANE\"; command -v jq >/dev/null 2>&1 && printf '%s' \"$payload\" | jq -e '.tool_input.run_in_background == true' >/dev/null 2>&1 && bellmux hold --pane-id \"$TMUX_PANE\"; exit 0"
       }]
     }],
     "PostToolUseFailure": [{

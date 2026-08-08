@@ -33,7 +33,7 @@ Claude hook との対応：
 | Notification (matcher: `permission_prompt\|elicitation_dialog`) | 権限要求 / MCP 入力要求 | `push --kind notification && bellmux bell` |
 | Stop | ターン完了 | `push --kind stop && bellmux bell` |
 | UserPromptSubmit | ユーザーが応答 | `ack-pane` |
-| PostToolUse | ツール実行完了（成功） | `ack-pane` |
+| PostToolUse | ツール実行完了（成功） | `ack-pane`、`run_in_background: true` の Bash なら続けて `hold` |
 | PostToolUseFailure | ツール実行完了（失敗） | `ack-pane` |
 | SessionEnd | セッション終了（/clear, logout, 終了等） | `ack-pane` |
 
@@ -79,6 +79,63 @@ Permission dialog の応答に直接対応するフックは **Claude Code が�
 なお Claude Code はツール完了を**成功（PostToolUse）/ 失敗（PostToolUseFailure）の 2 イベントに分割**する。当初 PostToolUse のみを ack トリガにしていたが、これだと "Allow" 直後にツールが失敗した場合（Bash の非ゼロ終了、grep のヒット 0、Edit の old_string 不一致など失敗は日常的）に PostToolUseFailure だけが発火して通知が残る。「ツールが終わった」ことに成功も失敗も無いため、**両イベントで ack** する。
 
 "Deny" 応答後に古い notification が残る問題は、実運用上「拒否した直後にユーザーが新しいプロンプトを入力することが多く、UserPromptSubmit で自然に ack される」ため許容。Claude Code 側で "ツール拒否時にフック発火する" 機能が将来入れば、そこで拾える。手動 ack (`prefix + A`) も常に利用可能。
+
+### self-driving ペインと hold
+
+**Stop は「ターン境界」であって「ユーザー入力待ち」ではない。** bellmux は前者を後者の代理として使っているので、エージェントが自分自身を再起動するループでズレる。
+
+具体例（`Daiius/oculibis` のレビュー待機レシピ: `run_in_background` で 30 秒 × 40 回ポーリング）：
+
+1. 待機ループを起動してターン終了 → **Stop → push** → **20 分間ずっと「あなた待ち」表示**
+2. ループ完了 → 自動再開 → 修正 → 再度待機 → **Stop → push** → また同じ
+3. 全部終わって最終報告 → **Stop → push** → これだけが正しい
+
+1 と 2 は誤りだが、3 は残したい。「Stop を通知源から外す」では 3 を失う。
+
+#### 実測: どのイベントが何を知っているか
+
+診断 hook を仕込んで 1 ペイン分のイベント列を実測した（`~/.claude/settings.json` は全セッション共通なので、`TMUX_PANE` と `session_id` でフィルタしないと他エージェントのイベントが混ざる）。
+
+```
+05:40:01  PostToolUse  tool=Bash  run_in_background=true   ← 起動の時点で発火する
+05:40:07  Stop                                             ← 誤通知
+05:41:07  Notification  notification_type=idle_prompt      ← Stop の 60 秒後
+05:41:16  UserPromptSubmit                                 ← task 完了による自動再開
+```
+
+わかったこと：
+
+- **`Stop` の payload に「なぜこのターンが始まったか」は無い**（`session_id` / `transcript_path` / `last_assistant_message` 等のみ）。起動元の判別はできない。
+- **`idle_prompt` は使えない**。バックグラウンドタスクが走っている最中でも Stop の 60 秒後に発火するので、「本当にユーザーが必要」を意味しない。ドキュメントの「teammate が idle になる通知」という説明も不正確で、teammate の無いセッションで発火した。
+- **`TaskCreated` / `TaskCompleted` は `TaskCreate` ツール専用**で、`run_in_background` の Bash や Monitor は対象外。
+- **自動再開でも `UserPromptSubmit` が発火する**（task 完了通知が user message として注入される）。したがって「UserPromptSubmit で arm して Stop で消費する（＝人間のプロンプト 1 回につき通知 1 回）」案は成立しない。そもそもこの案は上記 1 が armed 状態なので、一番痛いケースを潰せない。
+- **使える手がかりは 1 つだけ**: `PostToolUse` の payload に `tool_name` と `tool_input` がそのまま来るので、**「バックグラウンド待機を起動した」ことは Stop の 1 イベント前に観測できる**。
+
+#### 設計: read 時フィルタとしての hold
+
+`holds(pane_id, expires_at)` に「このペインは self-driving」を記録し、`status` / `ordered_panes` が読み出し時に除外する。
+
+**`push` は変更しない。** 「push は受け取った通知を必ず記録する」という既存の不変条件を保ったまま、抑制を surface 側だけに置く。これにより：
+
+- 抑制中でも記録は残るので `list` で見える（`held` フラグ付き）。「statusbar が静か」と「キューが空」が区別できなくなる事態を避ける。
+- **lease が切れれば自然に表面化する**。hold が漏れたときに倒れる方向が「通知が遅れる」であって「通知が消える」ではない。抑制機構としてはこの向きが必須。
+- 書き込み側（hook の `push`）に「出すか出さないか」の判断を持ち込まない。surface 対象の選別を hook matcher に寄せた方針と同じ形。
+
+hold の解放は **`ack-pane` が主経路、TTL は backstop**。ack は「ユーザーが介入した」か「ペインが実作業に戻った」を意味し、どちらでも self-driving ではなくなる。PostToolUse hook は 1 コマンド内で `ack-pane` → 条件付き `hold` の順に走るので、待機を起動したターンだけが hold を持ち越す。既定 TTL は 1800 秒 —— 現実的な自走待機を覆い、かつセッションごと落ちた場合でも同じセッション内で表面化する長さ。
+
+#### 検討して採らなかった案
+
+| 案 | 却下理由 |
+|---|---|
+| 待機ループ自身が毎周 `ack-pane` を打つ | bellmux 変更ゼロで済むが、ポーリング間隔ぶんの誤通知が残り、かつ自分で書いていない待機（組み込みツール等）には仕込めない |
+| Stop を通知源から外し、明示 `push` に任せる | 実装ゼロだがモデルの規律に依存し、上記 3（本当に見てほしい完了）を落とす |
+| `UserPromptSubmit` で arm、`Stop` で消費 | 自動再開でも UserPromptSubmit が発火するため成立しない（実測） |
+| `push` 側で hold を見て INSERT をスキップ | 記録が残らないので失効時に表面化できず、fail-visible にならない |
+| `jq` を使わず payload を文字列 grep | `command` 引数の中にたまたま `"run_in_background":true` を含む呼び出しで誤爆する（この機能の開発中に実際に起こりうる） |
+
+#### 適用範囲
+
+hold を張るのは **`tool_name == "Bash"` かつ `tool_input.run_in_background == true`** の場合のみ。これは PostToolUse が「起動時」に発火することを実測で確認できた唯一のケースだから。サブエージェント起動など他のバックグラウンド系ツールは、PostToolUse が「完了時」に発火する可能性があり、その場合 hold は**見たい通知の方を潰す**。検証できたものだけを対象にする。
 
 ## tmux statusbar / border: 試行錯誤の経緯
 

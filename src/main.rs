@@ -15,6 +15,17 @@ use std::process::Command;
 
 const ABOUT: &str = "Minimal notification layer bridging coding-agent hooks, tmux, and SQLite.";
 
+/// Default hold lease: 30 minutes. Long enough to cover a realistic
+/// self-driving wait (a polling loop, a long background build) and short
+/// enough that a hold leaked by a killed session resurfaces the same session
+/// rather than the next day. A hold is normally released well before this by
+/// the `ack-pane` that fires on the pane's next tool use.
+const DEFAULT_HOLD_TTL_SECS: i64 = 1800;
+
+/// Upper bound on `--ttl`. A hold is a suppression, so an unbounded one is a
+/// footgun; a day is far past any wait worth calling self-driving.
+const MAX_HOLD_TTL_SECS: i64 = 86_400;
+
 #[derive(Parser)]
 #[command(name = "bellmux", version, about = ABOUT)]
 struct Cli {
@@ -40,6 +51,24 @@ enum Cmd {
     AckAll,
     /// Drop notifications belonging to a pane that no longer exists.
     PrunePane {
+        #[arg(long = "pane-id")]
+        pane_id: String,
+    },
+    /// Mark a pane as self-driving: it is waiting on machinery it started
+    /// itself (a backgrounded command, a spawned agent), not on the user, so
+    /// `status` and `next`/`prev` stop advertising it. Notifications are still
+    /// recorded and reappear when the lease expires or the pane is acked.
+    Hold {
+        #[arg(long = "pane-id")]
+        pane_id: String,
+        /// Lease length in seconds. The hold is normally released early by the
+        /// next `ack-pane`; the lease only bounds how long a hold can survive
+        /// a wait that never came back.
+        #[arg(long, default_value_t = DEFAULT_HOLD_TTL_SECS)]
+        ttl: i64,
+    },
+    /// Release a hold placed by `hold`. `ack-pane` / `ack-all` do this too.
+    Unhold {
         #[arg(long = "pane-id")]
         pane_id: String,
     },
@@ -122,6 +151,8 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::AckPane { pane_id } => cmd_ack_pane(&pane_id),
         Cmd::AckAll => cmd_ack_all(),
         Cmd::PrunePane { pane_id } => cmd_prune_pane(&pane_id),
+        Cmd::Hold { pane_id, ttl } => cmd_hold(&pane_id, ttl),
+        Cmd::Unhold { pane_id } => cmd_unhold(&pane_id),
         Cmd::Status { format, only_pane } => cmd_status(&format, only_pane.as_deref()),
         Cmd::List { tsv, json } => cmd_list(tsv, json),
         Cmd::Next { current } => cmd_next(current.as_deref()),
@@ -162,6 +193,25 @@ fn cmd_prune_pane(pane_id: &str) -> Result<()> {
     validate::pane_id(pane_id)?;
     let conn = db::open()?;
     db::delete_pane(&conn, pane_id)?;
+    Ok(())
+}
+
+fn cmd_hold(pane_id: &str, ttl: i64) -> Result<()> {
+    validate::pane_id(pane_id)?;
+    if ttl <= 0 || ttl > MAX_HOLD_TTL_SECS {
+        return Err(anyhow!(
+            "--ttl must be between 1 and {MAX_HOLD_TTL_SECS} seconds, got {ttl}"
+        ));
+    }
+    let conn = db::open()?;
+    db::set_hold(&conn, pane_id, &db::expiry_iso8601(ttl))?;
+    Ok(())
+}
+
+fn cmd_unhold(pane_id: &str) -> Result<()> {
+    validate::pane_id(pane_id)?;
+    let conn = db::open()?;
+    db::clear_hold(&conn, pane_id)?;
     Ok(())
 }
 
@@ -308,10 +358,21 @@ fn print_list_human(rows: &[db::Notification]) {
     for r in rows {
         let when = db::relative_time(&r.created_at, now);
         let msg = r.message.as_deref().unwrap_or("");
-        println!("{:<6} {:<10} {:<14} {}", r.pane_id, when, r.kind, msg);
+        // Marking held rows is what keeps "the status bar is quiet" and "the
+        // queue is empty" distinguishable when a hold is in play.
+        let kind = if r.held {
+            format!("{} [held]", r.kind)
+        } else {
+            r.kind.clone()
+        };
+        println!("{:<6} {:<10} {:<14} {}", r.pane_id, when, kind, msg);
     }
 }
 
+/// TSV keeps its four fixed columns. The hold state is deliberately not added:
+/// the `popup-enriched` preset reads these lines with `read pane created kind
+/// msg`, so a fifth column would be swallowed into `msg`. Use `--json` (which
+/// carries `held`) when a consumer needs it.
 fn print_list_tsv(rows: &[db::Notification]) {
     for r in rows {
         let msg = r.message.as_deref().unwrap_or("");
@@ -329,6 +390,7 @@ fn print_list_json(rows: &[db::Notification]) {
                 "created_at": r.created_at,
                 "kind": r.kind,
                 "message": r.message,
+                "held": r.held,
             })
         })
         .collect();

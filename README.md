@@ -107,6 +107,15 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
     bind-key A run-shell 'bellmux ack-pane --pane-id "#{pane_id}" && tmux refresh-client -S'
     bind-key X run-shell 'bellmux ack-all && tmux refresh-client -S'
     ```
+- `bellmux hold --pane-id <%N>` marks a pane as **self-driving** — waiting on machinery it started itself, not on you.
+
+  An agent that launches a background command and ends its turn to wait for it trips the Stop hook, so the pane is advertised as waiting on you for the entire wait; when the command finishes the agent resumes, starts the next wait, and does it again. A hold makes `status` and `next`/`prev` skip the pane while the lease is alive. The notification is still recorded and it reappears when the lease expires, so a hold that leaks costs you a late notification, never a lost one. Any `ack-pane` (including the automatic one on `PostToolUse`) releases it.
+
+  The `claude-hooks` preset wires this up for you: it holds the pane when the tool that just ran was a Bash command with `run_in_background: true`. Do it by hand for your own waits:
+  ```sh
+  bellmux hold --pane-id "$TMUX_PANE" --ttl 600
+  slow-thing-that-runs-in-the-background &
+  ```
 
 ## Requirements
 
@@ -180,6 +189,8 @@ bellmux push       --kind <notification|stop> --pane-id <%N>   # record a notifi
 bellmux ack-pane   --pane-id <%N>                              # acknowledge all notifications for a pane
 bellmux ack-all                                                # acknowledge everything
 bellmux prune-pane --pane-id <%N>                              # alias of ack-pane (used by pane-died hook)
+bellmux hold       --pane-id <%N> [--ttl <secs>]               # stop advertising a self-driving pane (default 1800s lease)
+bellmux unhold     --pane-id <%N>                              # release a hold (ack-pane / ack-all do this too)
 bellmux status     [--format <tpl>]                            # status string for tmux status-right
 bellmux list       [--tsv | --json]                            # list pending notifications
 bellmux next                                                   # advance the cycle cursor toward older pending panes
@@ -334,6 +345,15 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
     bind-key A run-shell 'bellmux ack-pane --pane-id "#{pane_id}" && tmux refresh-client -S'
     bind-key X run-shell 'bellmux ack-all && tmux refresh-client -S'
     ```
+- `bellmux hold --pane-id <%N>` はペインを **self-driving（自走中）** としてマークします。ユーザーではなく、自分で起動した機械仕掛けを待っている状態です。
+
+  エージェントがバックグラウンドコマンドを起動してターンを終えて待つと、そこで Stop hook が発火するため、待機している間ずっと「あなたを待っています」と表示されてしまいます。コマンドが終わるとエージェントは再開し、次の待機を始め、また同じことが起きます。hold 中は `status` と `next`/`prev` がそのペインを飛ばします。通知自体は記録されたままで、lease が切れれば再び表面化するので、hold が漏れても失うのは通知ではなく即時性だけです。`ack-pane`（`PostToolUse` の自動 ack を含む）で解放されます。
+
+  `claude-hooks` preset がこの配線を含んでいます（直前に実行されたツールが `run_in_background: true` の Bash だったときに hold する）。自前の待機処理には手で入れてください：
+  ```sh
+  bellmux hold --pane-id "$TMUX_PANE" --ttl 600
+  slow-thing-that-runs-in-the-background &
+  ```
 
 ## 動作要件
 
@@ -407,6 +427,8 @@ bellmux push       --kind <notification|stop> --pane-id <%N>   # 通知を記録
 bellmux ack-pane   --pane-id <%N>                              # 指定ペインの通知を全 ack
 bellmux ack-all                                                # 全 ack
 bellmux prune-pane --pane-id <%N>                              # ack-pane の別名（pane-died hook 用）
+bellmux hold       --pane-id <%N> [--ttl <secs>]               # 自走中ペインの表示を止める（lease 既定 1800 秒）
+bellmux unhold     --pane-id <%N>                              # hold を解除（ack-pane / ack-all でも解除される）
 bellmux status     [--format <tpl>]                            # tmux status-right 用ステータス文字列
 bellmux list       [--tsv | --json]                            # 未対応通知一覧
 bellmux next                                                   # サイクル cursor を古い方向へ進める
