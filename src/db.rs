@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use rusqlite::{params, Connection, OpenFlags};
 use std::path::PathBuf;
 
@@ -58,7 +58,14 @@ pub fn open() -> Result<Connection> {
 }
 
 pub fn now_iso8601() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    format_ts(Timestamp::now())
+}
+
+/// The single on-disk timestamp format: RFC3339 UTC, whole seconds, `Z` suffix
+/// (`2026-04-20T10:31:00Z`). Every stored timestamp must use exactly this shape
+/// because `holds.expires_at` is compared as a plain string.
+fn format_ts(ts: Timestamp) -> String {
+    ts.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Replace any control character (tab/CR/LF as well as ESC/BEL/other C0/C1 and
@@ -158,7 +165,7 @@ pub fn clear_cursor(conn: &Connection) -> Result<()> {
 
 /// RFC3339 UTC timestamp `secs` seconds from now — the expiry of a hold lease.
 pub fn expiry_iso8601(secs: i64) -> String {
-    (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    format_ts(Timestamp::now() + SignedDuration::from_secs(secs))
 }
 
 /// Place (or refresh) a hold on a pane until `expires_at`.
@@ -368,16 +375,12 @@ pub fn prev_pane(conn: &Connection, current: Option<&str>) -> Result<Option<Cycl
 }
 
 /// Render relative-time-ago string ("2m ago", "10s ago").
-pub fn relative_time(created_at: &str, now: DateTime<Utc>) -> String {
-    let parsed: Option<DateTime<Utc>> = DateTime::parse_from_rfc3339(created_at)
-        .ok()
-        .map(|d| d.with_timezone(&Utc));
-    let parsed = match parsed {
-        Some(p) => p,
-        None => return created_at.to_string(),
+pub fn relative_time(created_at: &str, now: Timestamp) -> String {
+    let parsed: Timestamp = match created_at.parse() {
+        Ok(p) => p,
+        Err(_) => return created_at.to_string(),
     };
-    let elapsed = now.signed_duration_since(parsed);
-    let secs = elapsed.num_seconds();
+    let secs = now.duration_since(parsed).as_secs();
     if secs < 0 {
         return "future".to_string();
     }
@@ -578,8 +581,20 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_format_is_whole_seconds_utc_z() {
+        // Sub-second precision must be dropped and the offset rendered as `Z`,
+        // or string comparison against existing rows stops being chronological.
+        let ts: Timestamp = "2026-04-20T19:31:05.987654321+09:00".parse().unwrap();
+        assert_eq!(format_ts(ts), "2026-04-20T10:31:05Z");
+        let now = now_iso8601();
+        assert_eq!(now.len(), 20, "{now}");
+        assert!(now.ends_with('Z'), "{now}");
+        assert_eq!(now.parse::<Timestamp>().unwrap().subsec_nanosecond(), 0);
+    }
+
+    #[test]
     fn relative_time_formats() {
-        let now: DateTime<Utc> = "2026-04-20T10:31:00Z".parse().unwrap();
+        let now: Timestamp = "2026-04-20T10:31:00Z".parse().unwrap();
         assert_eq!(relative_time("2026-04-20T10:30:55Z", now), "5s ago");
         assert_eq!(relative_time("2026-04-20T10:29:00Z", now), "2m ago");
         assert_eq!(relative_time("2026-04-20T08:31:00Z", now), "2h ago");

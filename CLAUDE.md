@@ -121,7 +121,7 @@ statusbar の refresh は tmux の status-interval poll に任せる（素朴・
 - `rusqlite` (bundled) — SQLite を静的リンク
 - `clap` (derive) — CLI パース
 - `serde_json` — Claude payload 解析
-- `chrono` — RFC3339 UTC
+- `jiff` — RFC3339 UTC（`chrono` は作者が soft-deprecate し RUSTSEC-2026-0543 で unmaintained 扱いになったため置き換え）
 - `anyhow` — CLI エラー
 - `dirs` — XDG / macOS ディレクトリ解決
 

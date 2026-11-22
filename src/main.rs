@@ -354,7 +354,7 @@ fn read_stdin_message() -> Option<String> {
 }
 
 fn print_list_human(rows: &[db::Notification]) {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     for r in rows {
         let when = db::relative_time(&r.created_at, now);
         let msg = r.message.as_deref().unwrap_or("");
