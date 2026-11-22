@@ -30,11 +30,11 @@ Claude hook との対応：
 
 | Hook | 意味 | 動作 |
 |---|---|---|
-| Notification (matcher: `permission_prompt\|elicitation_dialog`) | 権限要求 / MCP 入力要求 | `push --kind notification && bellmux bell` |
-| Stop | ターン完了 | `push --kind stop && bellmux bell` |
+| Notification (matcher: `permission_prompt\|elicitation_dialog`) | 権限要求 / MCP 入力要求 | `unhold` → `push --kind notification && bellmux bell` |
+| Stop | ターン完了 | `background_tasks` に実行中があれば `hold` → `push`（bell なし）、無ければ `push && bellmux bell` |
 | UserPromptSubmit | ユーザーが応答 | `ack-pane` |
-| PostToolUse | ツール実行完了（成功） | `ack-pane`、`run_in_background: true` の Bash なら続けて `hold` |
-| PostToolUseFailure | ツール実行完了（失敗） | `ack-pane` |
+| PostToolUse | ツール実行完了（成功） | `ack-pane`（payload に `agent_id` があればサブエージェントのイベントなので何もしない） |
+| PostToolUseFailure | ツール実行完了（失敗） | 同上 |
 | SessionEnd | セッション終了（/clear, logout, 終了等） | `ack-pane` |
 
 加えて `prefix + a`（現在ペイン）/ `prefix + X`（全体）で手動 ack。
@@ -109,7 +109,7 @@ Permission dialog の応答に直接対応するフックは **Claude Code が�
 - **`idle_prompt` は使えない**。バックグラウンドタスクが走っている最中でも Stop の 60 秒後に発火するので、「本当にユーザーが必要」を意味しない。ドキュメントの「teammate が idle になる通知」という説明も不正確で、teammate の無いセッションで発火した。
 - **`TaskCreated` / `TaskCompleted` は `TaskCreate` ツール専用**で、`run_in_background` の Bash や Monitor は対象外。
 - **自動再開でも `UserPromptSubmit` が発火する**（task 完了通知が user message として注入される）。したがって「UserPromptSubmit で arm して Stop で消費する（＝人間のプロンプト 1 回につき通知 1 回）」案は成立しない。そもそもこの案は上記 1 が armed 状態なので、一番痛いケースを潰せない。
-- **使える手がかりは 1 つだけ**: `PostToolUse` の payload に `tool_name` と `tool_input` がそのまま来るので、**「バックグラウンド待機を起動した」ことは Stop の 1 イベント前に観測できる**。
+- **使える手がかりは 1 つだけ**（初版時点の誤認。実際は Stop の payload に `background_tasks` があった。下の「改訂（2026-11）」を参照）: `PostToolUse` の payload に `tool_name` と `tool_input` がそのまま来るので、**「バックグラウンド待機を起動した」ことは Stop の 1 イベント前に観測できる**。
 
 #### 設計: read 時フィルタとしての hold
 
@@ -121,7 +121,7 @@ Permission dialog の応答に直接対応するフックは **Claude Code が�
 - **lease が切れれば自然に表面化する**。hold が漏れたときに倒れる方向が「通知が遅れる」であって「通知が消える」ではない。抑制機構としてはこの向きが必須。
 - 書き込み側（hook の `push`）に「出すか出さないか」の判断を持ち込まない。surface 対象の選別を hook matcher に寄せた方針と同じ形。
 
-hold の解放は **`ack-pane` が主経路、TTL は backstop**。ack は「ユーザーが介入した」か「ペインが実作業に戻った」を意味し、どちらでも self-driving ではなくなる。PostToolUse hook は 1 コマンド内で `ack-pane` → 条件付き `hold` の順に走るので、待機を起動したターンだけが hold を持ち越す。既定 TTL は 1800 秒 —— 現実的な自走待機を覆い、かつセッションごと落ちた場合でも同じセッション内で表面化する長さ。
+hold の解放は **`ack-pane` が主経路、TTL は backstop**。ack は「ユーザーが介入した」か「ペインが実作業に戻った」を意味し、どちらでも self-driving ではなくなる。PostToolUse hook は 1 コマンド内で `ack-pane` → 条件付き `hold` の順に走るので、待機を起動したターンだけが hold を持ち越す。（初版の配線。hold を張る場所は、下の「改訂（2026-11）」で Stop に移した）既定 TTL は 1800 秒 —— 現実的な自走待機を覆い、かつセッションごと落ちた場合でも同じセッション内で表面化する長さ。
 
 #### 検討して採らなかった案
 
@@ -133,9 +133,38 @@ hold の解放は **`ack-pane` が主経路、TTL は backstop**。ack は「ユ
 | `push` 側で hold を見て INSERT をスキップ | 記録が残らないので失効時に表面化できず、fail-visible にならない |
 | `jq` を使わず payload を文字列 grep | `command` 引数の中にたまたま `"run_in_background":true` を含む呼び出しで誤爆する（この機能の開発中に実際に起こりうる） |
 
-#### 適用範囲
+#### 適用範囲（初版。下の「改訂」で置き換え済み）
 
 hold を張るのは **`tool_name == "Bash"` かつ `tool_input.run_in_background == true`** の場合のみ。これは PostToolUse が「起動時」に発火することを実測で確認できた唯一のケースだから。サブエージェント起動など他のバックグラウンド系ツールは、PostToolUse が「完了時」に発火する可能性があり、その場合 hold は**見たい通知の方を潰す**。検証できたものだけを対象にする。
+
+#### 改訂（2026-11）: Stop の時点で判定する
+
+初版の hold は「PostToolUse で Bash の `run_in_background` を見て張る」方式だった。これには「バックグラウンドで動くのに、すぐ通知が出て少し後に消える」という取りこぼしがあった。0.2 秒ごとの holds テーブルの記録と hook のログ（Claude Code 2.1.330）で、原因を 2 つ特定した。
+
+```
+01:03:43.537  hold が張られる（バックグラウンド Bash 起動時の PostToolUse）
+01:03:44.539  hold が消える ← 本体は何もしていない。サブエージェントの PostToolUse の ack-pane
+...
+01:05:24.105  Stop  background_tasks=[{type:subagent,status:running},{type:shell,status:running}]
+01:05:24.365  PostToolUse agent_id=…（サブエージェント）→ ack-pane で Stop の通知が消える
+```
+
+- **サブエージェントのツール呼び出しも、同じペインで PostToolUse を発火させる。** payload には `agent_id` / `agent_type` が付く。これを ack として扱っていたので、本体が張った hold が解除され、本体の通知も消されていた。本体が許可ダイアログで止まっている間に、バックグラウンドのサブエージェントがツールを使うと、**本物の通知まで消える**。
+- **サブエージェント（Agent）や Monitor のバックグラウンド起動は、初版の hold の対象外だった。** そのため Stop で通知が立ち、直後にサブエージェントの ack で消える、という表示のちらつきになっていた。
+- **Stop の payload には `background_tasks` がある**（Claude Code 2.1.145 で追加）。初版の実測時に「Stop の payload に手がかりは無い」と書いたのは誤りだった。各要素は `id` / `type`（`shell` / `subagent` / `monitor` など）/ `status` を持つ。
+
+改訂後の配線：
+
+- **Stop**: `background_tasks` に `status == "running"` があれば、`hold` を張ってから `push` し、bell は鳴らさない。無ければ従来どおり `push && bell`。ターンが終わった時点の実態で判定するので、起動したツールの種類も、間に挟まったツール呼び出しも関係なくなる。hold が失敗しても `push` は必ず走る（記録は必ず行う不変条件）。bell を鳴らさないのは「記録」ではなく「表面化」の判断なので、read 時フィルタの方針とは矛盾しない。
+- **PostToolUse / PostToolUseFailure**: `agent_id` を持つ payload では何もしない。代償として、サブエージェントの許可ダイアログに答えたあとも、本体が次に ack するまで通知が残る。倒れる方向は「見えすぎ」なので許容する。
+- **Notification**: `unhold` してから `push`。許可ダイアログはサブエージェント発でも「ユーザーが必要」そのもので、hold で隠してはいけない。
+- PostToolUse で張っていた hold は廃止した。Stop の時点の判定が、それを包含する。
+- jq が無い環境や、`background_tasks` が無い古い Claude Code では hold は張られず、すべての Stop が通知する（fail-visible）。
+
+まだ残る限界：
+
+- 既定の lease は 1800 秒。Claude Code のバックグラウンド Bash は最長 2 時間動くので、それより長い待機では途中で表面化する。倒れる方向は「見えすぎ」なので許容する。
+- `session_crons`（`/loop` や `ScheduleWakeup` の予約）は判定に含めていない。予約は数時間先のこともあり、hold の lease で覆いきれないため。
 
 ## tmux statusbar / border: 試行錯誤の経緯
 

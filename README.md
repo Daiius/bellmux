@@ -109,9 +109,9 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
     ```
 - `bellmux hold --pane-id <%N>` marks a pane as **self-driving** — waiting on machinery it started itself, not on you.
 
-  An agent that launches a background command and ends its turn to wait for it trips the Stop hook, so the pane is advertised as waiting on you for the entire wait; when the command finishes the agent resumes, starts the next wait, and does it again. A hold makes `status` and `next`/`prev` skip the pane while the lease is alive. The notification is still recorded and it reappears when the lease expires, so a hold that leaks costs you a late notification, never a lost one. Any `ack-pane` (including the automatic one on `PostToolUse`) releases it.
+  An agent that launches a background command and ends its turn to wait for it trips the Stop hook, so the pane is advertised as waiting on you for the entire wait; when the command finishes the agent resumes, starts the next wait, and does it again. A hold makes `status` and `next`/`prev` skip the pane while the lease is alive. The notification is still recorded and it reappears when the lease expires, so a hold that leaks costs you a late notification, never a lost one. Any `ack-pane` (including the automatic one on `UserPromptSubmit` when the agent resumes) releases it.
 
-  The `claude-hooks` preset wires this up for you: it holds the pane when the tool that just ran was a Bash command with `run_in_background: true`. Do it by hand for your own waits:
+  The `claude-hooks` preset wires this up for you: when a turn ends while background work is still running (Claude Code's Stop payload lists it in `background_tasks`), it holds the pane instead of ringing. Tool events from subagents running in the same pane are not treated as acks, and a permission prompt always releases the hold. Do it by hand for your own waits:
   ```sh
   bellmux hold --pane-id "$TMUX_PANE" --ttl 600
   slow-thing-that-runs-in-the-background &
@@ -153,7 +153,9 @@ bellmux init --preset fullbar         # → ~/.tmux.conf  (or widget / overlay /
 bellmux init --preset keybinds        # → ~/.tmux.conf
 ```
 
-Then `tmux source-file ~/.tmux.conf`, restart Codex, and review/trust the new hooks from `/hooks`.
+Then `tmux source-file ~/.tmux.conf`, restart Codex, and review/trust the new hooks from `/hooks` (re-trust after updating the snippet: Codex trusts each entry's exact content).
+
+> **Run Codex as `codex --no-daemon` inside tmux** (e.g. `alias codex='codex --no-daemon'`). Since codex-cli 0.157, sessions run in a shared app-server daemon by default and hooks see the `$TMUX_PANE` of whichever pane started that daemon, so notifications land on the wrong pane ([openai/codex#48500](https://github.com/openai/codex/issues/48500)).
 
 ## Using with other tools
 
@@ -347,9 +349,9 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
     ```
 - `bellmux hold --pane-id <%N>` はペインを **self-driving（自走中）** としてマークします。ユーザーではなく、自分で起動した機械仕掛けを待っている状態です。
 
-  エージェントがバックグラウンドコマンドを起動してターンを終えて待つと、そこで Stop hook が発火するため、待機している間ずっと「あなたを待っています」と表示されてしまいます。コマンドが終わるとエージェントは再開し、次の待機を始め、また同じことが起きます。hold 中は `status` と `next`/`prev` がそのペインを飛ばします。通知自体は記録されたままで、lease が切れれば再び表面化するので、hold が漏れても失うのは通知ではなく即時性だけです。`ack-pane`（`PostToolUse` の自動 ack を含む）で解放されます。
+  エージェントがバックグラウンドコマンドを起動してターンを終えて待つと、そこで Stop hook が発火するため、待機している間ずっと「あなたを待っています」と表示されてしまいます。コマンドが終わるとエージェントは再開し、次の待機を始め、また同じことが起きます。hold 中は `status` と `next`/`prev` がそのペインを飛ばします。通知自体は記録されたままで、lease が切れれば再び表面化するので、hold が漏れても失うのは通知ではなく即時性だけです。`ack-pane`（エージェントが再開したときの `UserPromptSubmit` の自動 ack を含む）で解放されます。
 
-  `claude-hooks` preset がこの配線を含んでいます（直前に実行されたツールが `run_in_background: true` の Bash だったときに hold する）。自前の待機処理には手で入れてください：
+  `claude-hooks` preset がこの配線を含んでいます。バックグラウンド処理が動いたままターンが終わると（Claude Code の Stop の payload の `background_tasks` に載ります）、bell を鳴らす代わりにペインを hold します。同じペインで動くサブエージェントのツールイベントは ack として扱わず、許可ダイアログが出たら hold を解除します。自前の待機処理には手で入れてください：
   ```sh
   bellmux hold --pane-id "$TMUX_PANE" --ttl 600
   slow-thing-that-runs-in-the-background &
@@ -391,7 +393,9 @@ bellmux init --preset fullbar         # → ~/.tmux.conf  （widget / overlay / 
 bellmux init --preset keybinds        # → ~/.tmux.conf
 ```
 
-適用後、`tmux source-file ~/.tmux.conf` と Codex 再起動。Codex 側で `/hooks` から新しい hook を review / trust してください。
+適用後、`tmux source-file ~/.tmux.conf` と Codex 再起動。Codex 側で `/hooks` から新しい hook を review / trust してください（Codex は各 hook の内容そのものを trust するので、snippet を更新したら trust し直しが要ります）。
+
+> **tmux 内では Codex を `codex --no-daemon` で起動してください**（例: `alias codex='codex --no-daemon'`）。codex-cli 0.157 以降、セッションは既定で共有の app-server daemon の中で動き、hook にはその daemon を起動したペインの `$TMUX_PANE` が渡ります。そのため通知が別のペインに付きます（[openai/codex#48500](https://github.com/openai/codex/issues/48500)）。
 
 ## 他のツールと組み合わせる
 
