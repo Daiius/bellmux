@@ -119,7 +119,8 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
 
 ## Requirements
 
-- Rust 1.74+ (for `cargo build`)
+- Rust 1.89+ (for `cargo build`). Cargo 1.100+ is needed to honour the dependency cooldown in `.cargo/config.toml` when updating dependencies; older Cargo ignores it.
+- `jq` (optional, used by the Claude Code / Codex hook snippets). Without it the hooks still record and clear notifications, but they cannot hold a pane that is waiting on its own background work, nor tell subagent events apart from the main session's.
 - tmux 3.2+ recommended (the `fullbar` status preset uses `#{?#(...),T,F}` conditional styles, available since 2.9)
 
 Claude Code and Codex are optional — they are first-party integrations, but bellmux runs without either.
@@ -359,7 +360,8 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
 
 ## 動作要件
 
-- Rust 1.74+（`cargo build` 用）
+- Rust 1.89+（`cargo build` 用）。依存を更新するときに `.cargo/config.toml` の cooldown を効かせるには Cargo 1.100+ が必要です（古い Cargo はこの設定を無視します）。
+- `jq`（任意。Claude Code / Codex の hook snippet が使います）。無くても通知の記録と解除はできますが、自分のバックグラウンド処理を待っているペインの hold と、サブエージェントのイベントの見分けができなくなります。
 - tmux 3.2+ 推奨（`fullbar` プリセットが `#{?#(...),T,F}` 条件式スタイルを使用、必要バージョンは 2.9 以降）
 
 Claude Code / Codex は optional です。first-party integration はありますが、bellmux はどちらが無くても動きます。
