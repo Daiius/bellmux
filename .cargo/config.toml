@@ -1,0 +1,5 @@
+# Supply-chain cooldown: the resolver ignores crate versions published less than
+# this long ago (Cargo >= 1.100; older Cargo silently ignores the key).
+# Versions already in Cargo.lock are kept. See DESIGN.md for the rationale.
+[registry]
+global-min-publish-age = "7 days"

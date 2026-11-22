@@ -178,6 +178,14 @@ hold を張るのは **`tool_name == "Bash"` かつ `tool_input.run_in_backgroun
 - 通知 message を eval / shell コマンドとして実行しない
 - `run-shell` に DB 由来の文字列を直接渡さない（`pane_id` は検証済み正規表現に合致するもののみ）
 
+### 依存クレート（サプライチェーン）
+
+- **公開から 7 日未満の版は解決に使わない**: `.cargo/config.toml` の `registry.global-min-publish-age = "7 days"`（Cargo 1.100 で安定化）。乗っ取られたアカウントから悪性版が公開されても、多くは数日のうちに検知されて yank される。その期間を待ってから取り込むための cooldown。
+- 効くのは解決時（`cargo update` / `cargo add` / lockfile 生成）だけ。`Cargo.lock` に既にある版は維持され、ビルドは lockfile 通りに進む。
+- 1.100 より古い Cargo はこのキーを黙って無視する。保護が外れるだけで、ビルドは壊れない。
+- 脆弱性の修正版など、どうしても新しい版が要るときは、1 回限り `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <ver>` で取り込む。設定そのものは緩めない。
+- 監査は `cargo audit`（RustSec）。
+
 ## エラーコード
 
 | Code | 意味 |
