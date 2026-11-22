@@ -288,8 +288,19 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
 # exists, merge the top-level "hooks" object; do not overwrite unrelated hooks.
 # Codex passes the hook payload on stdin. The push hooks below intentionally
 # pipe a small fixed JSON object into bellmux instead, so Codex prompts and
-# hook payloads are not stored in bellmux. $TMUX_PANE is inherited by hook
-# subprocesses when Codex runs inside tmux.
+# hook payloads are not stored in bellmux. The ack hooks read the payload only
+# to test for `agent_id` (see below); nothing from it is stored.
+#
+# Run Codex with --no-daemon inside tmux (REQUIRED for correct panes):
+#   Since codex-cli 0.157 the interactive `codex` hands sessions to a shared
+#   app-server daemon by default, and hooks run inside that daemon with the
+#   environment of whichever client started it. $TMUX_PANE in a hook is then
+#   the pane of the FIRST Codex you opened, for every Codex pane — notifications
+#   and acks land on the wrong pane (openai/codex#48500, open as of 2026-11).
+#   The guard below cannot catch this: the variable is set, just wrong.
+#   `codex --no-daemon` keeps the session (and its hooks) in the process
+#   started in this pane, so $TMUX_PANE is right again. For example:
+#     alias codex='codex --no-daemon'
 #
 # Running outside tmux:
 #   Every command starts with `[ -n "$TMUX_PANE" ] || exit 0;` so a Codex
@@ -299,21 +310,33 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
 #
 # Codex hook trust:
 #   Non-managed command hooks must be reviewed and trusted before they run.
-#   Use /hooks in Codex after adding this file.
+#   Use /hooks in Codex after adding this file. The trust covers each entry's
+#   exact content, so after editing (or updating to a newer version of this
+#   snippet) the changed entries stop running until you trust them again.
 #
 # Notification policy:
-#   - PermissionRequest: Codex is about to ask for approval; surface it.
-#   - Stop: assistant turn completed; surface it.
+#   - PermissionRequest: Codex is about to ask for approval; surface it. This
+#     includes requests from subagents — those need you just the same.
+#   - Stop: assistant turn completed; surface it. No hold is placed: Codex
+#     does not wake a session when a background terminal finishes, so a turn
+#     that ends with one still running is genuinely waiting on you.
+#
+# Subagent events:
+#   Subagent tool calls and prompts fire PostToolUse / UserPromptSubmit in the
+#   same pane, with `agent_id` in the payload (absent for the main session).
+#   They are not acks — acking on them would clear a real pending approval of
+#   the main session — so the ack hooks skip payloads that carry `agent_id`.
+#   Without jq the check cannot be made and every event acks.
 #
 # Ack policy:
 #   - UserPromptSubmit: user typed a new prompt; clear pending for this pane.
 #   - PostToolUse: a tool completed, including non-zero Bash exits in current
 #     Codex releases; clear any stale approval notification for this pane.
-#   - SessionStart startup/resume/clear: Codex does not currently expose a
-#     SessionEnd hook, so clear stale pane notifications when a Codex session
-#     starts or resumes in the pane. This is close to SessionEnd cleanup in
-#     practice: the next time the user returns to that pane, stale work is no
-#     longer advertised.
+#   - Interrupt: the user interrupted a running turn, so they are here.
+#   - SessionEnd: the session shut down (codex-cli >= 0.145).
+#   - SessionStart startup/resume/clear: kept alongside SessionEnd, which has a
+#     1-3 s budget and does not cover a Codex that was killed. Clearing again
+#     when a session starts or resumes in the pane removes anything stale.
 {
   "hooks": {
     "PermissionRequest": [{
@@ -335,7 +358,7 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
     "UserPromptSubmit": [{
       "hooks": [{
         "type": "command",
-        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; payload=$(cat); if command -v jq >/dev/null 2>&1 && printf '%s' \"$payload\" | jq -e 'has(\"agent_id\")' >/dev/null 2>&1; then exit 0; fi; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
         "statusMessage": "Clearing bellmux notification"
       }]
     }],
@@ -343,8 +366,22 @@ pub const CODEX_HOOKS: &str = r##"# --- bellmux Codex hooks ---
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; payload=$(cat); if command -v jq >/dev/null 2>&1 && printf '%s' \"$payload\" | jq -e 'has(\"agent_id\")' >/dev/null 2>&1; then exit 0; fi; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
         "statusMessage": "Clearing bellmux tool notification"
+      }]
+    }],
+    "Interrupt": [{
+      "hooks": [{
+        "type": "command",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "statusMessage": "Clearing bellmux notification"
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "[ -n \"$TMUX_PANE\" ] || exit 0; bellmux ack-pane --pane-id \"$TMUX_PANE\"",
+        "statusMessage": "Clearing bellmux notification"
       }]
     }],
     "SessionStart": [{
@@ -450,11 +487,11 @@ mod tests {
         assert!(by_name("nope").is_none());
     }
 
-    /// Run a Claude hook command under `sh` with `bellmux` replaced by a stub
+    /// Run a hook command from `preset` under `sh` with `bellmux` replaced by a stub
     /// that logs each invocation (subcommand plus whatever it read on stdin),
     /// and return the log lines. `None` when jq is unavailable, since the
     /// behaviour under test is the jq branch.
-    fn run_claude_hook(event: &str, payload: &str) -> Option<Vec<String>> {
+    fn run_hook(preset: &str, event: &str, payload: &str) -> Option<Vec<String>> {
         use std::io::Write;
         use std::process::{Command, Stdio};
         if Command::new("jq").arg("--version").output().is_err() {
@@ -490,7 +527,7 @@ mod tests {
         );
         let mut child = Command::new("sh")
             .arg("-c")
-            .arg(command(CLAUDE_HOOKS, event))
+            .arg(command(preset, event))
             .env("PATH", path)
             .env("TMUX_PANE", "%1")
             .stdin(Stdio::piped())
@@ -518,7 +555,7 @@ mod tests {
     #[test]
     fn stop_with_running_background_task_holds_then_records_without_bell() {
         let payload = r#"{"hook_event_name":"Stop","background_tasks":[{"id":"x","type":"subagent","status":"running"}]}"#;
-        let Some(calls) = run_claude_hook("Stop", payload) else {
+        let Some(calls) = run_hook(CLAUDE_HOOKS, "Stop", payload) else {
             return;
         };
         assert_eq!(subcommands(&calls), ["hold", "push"], "{calls:?}");
@@ -536,7 +573,7 @@ mod tests {
             r#"{"hook_event_name":"Stop","background_tasks":[{"id":"x","type":"shell","status":"completed"}]}"#,
             r#"{"hook_event_name":"Stop"}"#,
         ] {
-            let Some(calls) = run_claude_hook("Stop", payload) else {
+            let Some(calls) = run_hook(CLAUDE_HOOKS, "Stop", payload) else {
                 return;
             };
             assert_eq!(
@@ -565,7 +602,8 @@ mod tests {
     /// held for background work, so the hold is released before recording.
     #[test]
     fn notification_releases_hold_then_records_and_rings() {
-        let Some(calls) = run_claude_hook(
+        let Some(calls) = run_hook(
+            CLAUDE_HOOKS,
             "Notification",
             r#"{"notification_type":"permission_prompt"}"#,
         ) else {
@@ -580,7 +618,7 @@ mod tests {
     fn tool_events_from_subagents_do_not_ack() {
         for event in ["PostToolUse", "PostToolUseFailure"] {
             let sub = r#"{"hook_event_name":"PostToolUse","agent_id":"a1","agent_type":"general-purpose","tool_name":"Bash"}"#;
-            let Some(calls) = run_claude_hook(event, sub) else {
+            let Some(calls) = run_hook(CLAUDE_HOOKS, event, sub) else {
                 return;
             };
             assert!(
@@ -589,11 +627,51 @@ mod tests {
             );
 
             let main = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
-            let calls = run_claude_hook(event, main).unwrap();
+            let calls = run_hook(CLAUDE_HOOKS, event, main).unwrap();
             assert_eq!(
                 subcommands(&calls),
                 ["ack-pane"],
                 "{event} from the main session: {calls:?}"
+            );
+        }
+    }
+
+    /// Codex subagent prompts and tool calls carry `agent_id`; like Claude's,
+    /// they must not ack the main session's pending approval.
+    #[test]
+    fn codex_events_from_subagents_do_not_ack() {
+        for event in ["PostToolUse", "UserPromptSubmit"] {
+            let sub = r#"{"hook_event_name":"PostToolUse","agent_id":"a1","agent_type":"worker"}"#;
+            let Some(calls) = run_hook(CODEX_HOOKS, event, sub) else {
+                return;
+            };
+            assert!(
+                calls.is_empty(),
+                "{event} from a subagent must not call bellmux: {calls:?}"
+            );
+
+            let main = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
+            let calls = run_hook(CODEX_HOOKS, event, main).unwrap();
+            assert_eq!(
+                subcommands(&calls),
+                ["ack-pane"],
+                "{event} from the main session: {calls:?}"
+            );
+        }
+    }
+
+    /// The Codex push hooks must not hand the agent payload (which may hold
+    /// prompts) to bellmux: only the fixed message is recorded.
+    #[test]
+    fn codex_push_hooks_do_not_store_the_payload() {
+        for event in ["PermissionRequest", "Stop"] {
+            let Some(calls) = run_hook(CODEX_HOOKS, event, r#"{"prompt":"secret"}"#) else {
+                return;
+            };
+            assert_eq!(subcommands(&calls), ["push", "bell"], "{event}: {calls:?}");
+            assert!(
+                !calls[0].contains("secret"),
+                "{event} leaked the payload: {calls:?}"
             );
         }
     }

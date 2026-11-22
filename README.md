@@ -153,7 +153,9 @@ bellmux init --preset fullbar         # → ~/.tmux.conf  (or widget / overlay /
 bellmux init --preset keybinds        # → ~/.tmux.conf
 ```
 
-Then `tmux source-file ~/.tmux.conf`, restart Codex, and review/trust the new hooks from `/hooks`.
+Then `tmux source-file ~/.tmux.conf`, restart Codex, and review/trust the new hooks from `/hooks` (re-trust after updating the snippet: Codex trusts each entry's exact content).
+
+> **Run Codex as `codex --no-daemon` inside tmux** (e.g. `alias codex='codex --no-daemon'`). Since codex-cli 0.157, sessions run in a shared app-server daemon by default and hooks see the `$TMUX_PANE` of whichever pane started that daemon, so notifications land on the wrong pane ([openai/codex#48500](https://github.com/openai/codex/issues/48500)).
 
 ## Using with other tools
 
@@ -391,7 +393,9 @@ bellmux init --preset fullbar         # → ~/.tmux.conf  （widget / overlay / 
 bellmux init --preset keybinds        # → ~/.tmux.conf
 ```
 
-適用後、`tmux source-file ~/.tmux.conf` と Codex 再起動。Codex 側で `/hooks` から新しい hook を review / trust してください。
+適用後、`tmux source-file ~/.tmux.conf` と Codex 再起動。Codex 側で `/hooks` から新しい hook を review / trust してください（Codex は各 hook の内容そのものを trust するので、snippet を更新したら trust し直しが要ります）。
+
+> **tmux 内では Codex を `codex --no-daemon` で起動してください**（例: `alias codex='codex --no-daemon'`）。codex-cli 0.157 以降、セッションは既定で共有の app-server daemon の中で動き、hook にはその daemon を起動したペインの `$TMUX_PANE` が渡ります。そのため通知が別のペインに付きます（[openai/codex#48500](https://github.com/openai/codex/issues/48500)）。
 
 ## 他のツールと組み合わせる
 
