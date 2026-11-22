@@ -109,9 +109,9 @@ bellmux surfaces pending notifications and lets you cycle back to the tmux sessi
     ```
 - `bellmux hold --pane-id <%N>` marks a pane as **self-driving** — waiting on machinery it started itself, not on you.
 
-  An agent that launches a background command and ends its turn to wait for it trips the Stop hook, so the pane is advertised as waiting on you for the entire wait; when the command finishes the agent resumes, starts the next wait, and does it again. A hold makes `status` and `next`/`prev` skip the pane while the lease is alive. The notification is still recorded and it reappears when the lease expires, so a hold that leaks costs you a late notification, never a lost one. Any `ack-pane` (including the automatic one on `PostToolUse`) releases it.
+  An agent that launches a background command and ends its turn to wait for it trips the Stop hook, so the pane is advertised as waiting on you for the entire wait; when the command finishes the agent resumes, starts the next wait, and does it again. A hold makes `status` and `next`/`prev` skip the pane while the lease is alive. The notification is still recorded and it reappears when the lease expires, so a hold that leaks costs you a late notification, never a lost one. Any `ack-pane` (including the automatic one on `UserPromptSubmit` when the agent resumes) releases it.
 
-  The `claude-hooks` preset wires this up for you: it holds the pane when the tool that just ran was a Bash command with `run_in_background: true`. Do it by hand for your own waits:
+  The `claude-hooks` preset wires this up for you: when a turn ends while background work is still running (Claude Code's Stop payload lists it in `background_tasks`), it holds the pane instead of ringing. Tool events from subagents running in the same pane are not treated as acks, and a permission prompt always releases the hold. Do it by hand for your own waits:
   ```sh
   bellmux hold --pane-id "$TMUX_PANE" --ttl 600
   slow-thing-that-runs-in-the-background &
@@ -347,9 +347,9 @@ Claude Code との協調動作が最初のモチベーション（ターン完�
     ```
 - `bellmux hold --pane-id <%N>` はペインを **self-driving（自走中）** としてマークします。ユーザーではなく、自分で起動した機械仕掛けを待っている状態です。
 
-  エージェントがバックグラウンドコマンドを起動してターンを終えて待つと、そこで Stop hook が発火するため、待機している間ずっと「あなたを待っています」と表示されてしまいます。コマンドが終わるとエージェントは再開し、次の待機を始め、また同じことが起きます。hold 中は `status` と `next`/`prev` がそのペインを飛ばします。通知自体は記録されたままで、lease が切れれば再び表面化するので、hold が漏れても失うのは通知ではなく即時性だけです。`ack-pane`（`PostToolUse` の自動 ack を含む）で解放されます。
+  エージェントがバックグラウンドコマンドを起動してターンを終えて待つと、そこで Stop hook が発火するため、待機している間ずっと「あなたを待っています」と表示されてしまいます。コマンドが終わるとエージェントは再開し、次の待機を始め、また同じことが起きます。hold 中は `status` と `next`/`prev` がそのペインを飛ばします。通知自体は記録されたままで、lease が切れれば再び表面化するので、hold が漏れても失うのは通知ではなく即時性だけです。`ack-pane`（エージェントが再開したときの `UserPromptSubmit` の自動 ack を含む）で解放されます。
 
-  `claude-hooks` preset がこの配線を含んでいます（直前に実行されたツールが `run_in_background: true` の Bash だったときに hold する）。自前の待機処理には手で入れてください：
+  `claude-hooks` preset がこの配線を含んでいます。バックグラウンド処理が動いたままターンが終わると（Claude Code の Stop の payload の `background_tasks` に載ります）、bell を鳴らす代わりにペインを hold します。同じペインで動くサブエージェントのツールイベントは ack として扱わず、許可ダイアログが出たら hold を解除します。自前の待機処理には手で入れてください：
   ```sh
   bellmux hold --pane-id "$TMUX_PANE" --ttl 600
   slow-thing-that-runs-in-the-background &
