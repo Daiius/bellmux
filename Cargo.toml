@@ -13,12 +13,12 @@ name = "bellmux"
 path = "src/main.rs"
 
 [dependencies]
-rusqlite   = { version = "0.31", features = ["bundled"] }
+rusqlite   = { version = "0.43", features = ["bundled"] }
 clap       = { version = "4", features = ["derive"] }
 serde_json = "1"
 chrono     = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 anyhow     = "1"
-dirs       = "5"
+dirs       = "7"
 
 [profile.release]
 opt-level = 3
