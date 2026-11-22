@@ -1,0 +1,40 @@
+# PR checks. Read-only on purpose: the release workflow (contents: write) does
+# not run on pull requests (dist-workspace.toml: pr-run-mode = "skip").
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # 1.100 is the first Cargo that honours registry.global-min-publish-age
+      # (.cargo/config.toml). Installed with the runner's rustup; no
+      # third-party toolchain action.
+      - name: Install Rust 1.100.0
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component clippy
+          rustup default 1.100.0
+          cargo --version
+      - name: Build
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
