@@ -109,7 +109,7 @@ Permission dialog の応答に直接対応するフックは **Claude Code が�
 - **`idle_prompt` は使えない**。バックグラウンドタスクが走っている最中でも Stop の 60 秒後に発火するので、「本当にユーザーが必要」を意味しない。ドキュメントの「teammate が idle になる通知」という説明も不正確で、teammate の無いセッションで発火した。
 - **`TaskCreated` / `TaskCompleted` は `TaskCreate` ツール専用**で、`run_in_background` の Bash や Monitor は対象外。
 - **自動再開でも `UserPromptSubmit` が発火する**（task 完了通知が user message として注入される）。したがって「UserPromptSubmit で arm して Stop で消費する（＝人間のプロンプト 1 回につき通知 1 回）」案は成立しない。そもそもこの案は上記 1 が armed 状態なので、一番痛いケースを潰せない。
-- **使える手がかりは 1 つだけ**: `PostToolUse` の payload に `tool_name` と `tool_input` がそのまま来るので、**「バックグラウンド待機を起動した」ことは Stop の 1 イベント前に観測できる**。
+- **使える手がかりは 1 つだけ**（初版時点の誤認。実際は Stop の payload に `background_tasks` があった。下の「改訂（2026-11）」を参照）: `PostToolUse` の payload に `tool_name` と `tool_input` がそのまま来るので、**「バックグラウンド待機を起動した」ことは Stop の 1 イベント前に観測できる**。
 
 #### 設計: read 時フィルタとしての hold
 
@@ -121,7 +121,7 @@ Permission dialog の応答に直接対応するフックは **Claude Code が�
 - **lease が切れれば自然に表面化する**。hold が漏れたときに倒れる方向が「通知が遅れる」であって「通知が消える」ではない。抑制機構としてはこの向きが必須。
 - 書き込み側（hook の `push`）に「出すか出さないか」の判断を持ち込まない。surface 対象の選別を hook matcher に寄せた方針と同じ形。
 
-hold の解放は **`ack-pane` が主経路、TTL は backstop**。ack は「ユーザーが介入した」か「ペインが実作業に戻った」を意味し、どちらでも self-driving ではなくなる。PostToolUse hook は 1 コマンド内で `ack-pane` → 条件付き `hold` の順に走るので、待機を起動したターンだけが hold を持ち越す。既定 TTL は 1800 秒 —— 現実的な自走待機を覆い、かつセッションごと落ちた場合でも同じセッション内で表面化する長さ。
+hold の解放は **`ack-pane` が主経路、TTL は backstop**。ack は「ユーザーが介入した」か「ペインが実作業に戻った」を意味し、どちらでも self-driving ではなくなる。PostToolUse hook は 1 コマンド内で `ack-pane` → 条件付き `hold` の順に走るので、待機を起動したターンだけが hold を持ち越す。（初版の配線。hold を張る場所は、下の「改訂（2026-11）」で Stop に移した）既定 TTL は 1800 秒 —— 現実的な自走待機を覆い、かつセッションごと落ちた場合でも同じセッション内で表面化する長さ。
 
 #### 検討して採らなかった案
 
