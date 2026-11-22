@@ -5,7 +5,6 @@ edition = "2021"
 description = "Minimal notification layer bridging Claude Code hooks, tmux, and SQLite."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Daiius/bellmux"
-homepage = "https://github.com/Daiius/bellmux"
 readme = "README.md"
 
 [[bin]]
