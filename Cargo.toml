@@ -1,6 +1,7 @@
 [package]
 name = "bellmux"
-version = "0.1.1"
+version = "0.1.2"
+rust-version = "1.89"
 edition = "2021"
 description = "Minimal notification layer bridging Claude Code hooks, tmux, and SQLite."
 license = "MIT OR Apache-2.0"
